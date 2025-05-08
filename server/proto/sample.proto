@@ -1,0 +1,14 @@
+syntax = "proto2";
+
+package sample;
+
+message EntityMessage {
+  required string funcname = 1;
+  optional string funcargs = 2;
+}
+
+// example: LoginMessage
+message LoginMessage {
+  required string username = 1;
+  required string password = 2;
+}
