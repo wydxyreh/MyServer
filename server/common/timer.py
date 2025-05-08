@@ -7,7 +7,7 @@ class CallLater(object):
 	"""Calls a function at a later time.
 	"""
 	def __init__(self, seconds, target, *args, **kwargs):
-		super(CallLater, self).__init__()
+		super().__init__()
 		
 		self._delay = seconds
 		self._target = target
@@ -108,5 +108,3 @@ class TimerManager(object):
 		heapq.heapify(TimerManager.tasks)
 		
 		TimerManager.cancelled_num = 0
-		
-		return

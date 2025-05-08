@@ -28,13 +28,11 @@ class SimpleServer(object):
 	def tick(self):
 		self.host.process()
 
-		for eid, entity in self.entities.iteritems():
+		for eid, entity in self.entities.items():
 			# Note: you can not delete entity in tick.
 			# you may cache delete items and delete in next frame
 			# or just use items.
 			entity.tick()
-
-		return
 
 
 

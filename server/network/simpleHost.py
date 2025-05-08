@@ -10,7 +10,7 @@ from server.network.netStream import NetStream
 class SimpleHost(object):
 	
 	def __init__(self, timeout=conf.NET_HOST_DEFAULT_TIMEOUT):
-		super(SimpleHost, self).__init__()
+		super().__init__()
 
 		self.host = 0
 		self.state = conf.NET_STATE_STOP
@@ -21,12 +21,10 @@ class SimpleHost(object):
 		self.sock = None
 		self.port = 0
 		self.timeout = timeout
-
-		return
 	
 	def generateID(self):
 		pos = -1
-		for i in xrange(len(self.clients)):
+		for i in range(len(self.clients)):
 			if self.clients[i] == None:
 				pos = i
 				break
@@ -73,8 +71,6 @@ class SimpleHost(object):
 		self.queue = []
 		self.state = conf.NET_STATE_STOP
 		self.count = 0
-
-		return
 
 	# start listenning
 	def startup(self, port = 0):
@@ -165,10 +161,8 @@ class SimpleHost(object):
 		self.count += 1
 		self.queue.append((conf.NET_CONNECTION_NEW, hid, repr(client.peername)))
 
-		return
-
 	def updateClients(self, current):
-		for pos in xrange(len(self.clients)):
+		for pos in range(len(self.clients)):
 			client = self.clients[pos]
 			if not client:
 				continue
@@ -188,8 +182,6 @@ class SimpleHost(object):
 				client.close()
 				del client
 				self.count -= 1
-
-		return
 
 	# update: process clients and handle accepting
 	def process(self):
