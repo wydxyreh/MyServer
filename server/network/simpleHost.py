@@ -197,7 +197,17 @@ class SimpleHost(object):
 		if self.state != conf.NET_STATE_ESTABLISHED:
 			return 0
 
-		self.handleNewClient(current)
-		self.updateClients(current)
-		
-		return 0
+		try:
+			self.handleNewClient(current)
+			self.updateClients(current)
+			
+			# 如果队列中有事件，记录日志
+			if len(self.queue) > 0:
+				self.logger.debug(f"事件队列中有 {len(self.queue)} 个待处理事件")
+			
+			return 0
+		except Exception as e:
+			self.logger.error(f"处理网络事件时出错: {str(e)}")
+			import traceback
+			self.logger.error(traceback.format_exc())
+			return -1

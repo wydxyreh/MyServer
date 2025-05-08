@@ -38,21 +38,26 @@ class ClientEntity(object):
         self.stat = stat
         self.logger.info(f'客户端状态更新为: {self.stat}')
         
-        # 在实际应用中可以在这里处理服务器发来的各种消息
-        # 例如更新游戏状态、显示聊天消息等
-        
-        print("\n可用命令: [send] 发送新消息, [exit] 退出")
-        user_input = input("请输入命令: ")
-        if user_input.lower() == 'exit':
-            self.logger.info('客户端发送退出请求')
-            self.caller.remote_call("exit")
-        elif user_input.lower() == 'send':
-            message = input("请输入要发送的消息: ")
-            self.logger.info(f'客户端发送新消息: {message}')
-            self.caller.remote_call("hello_world_from_client", self.stat + 1, message)
-        else:
-            self.logger.info('未知命令，使用默认消息')
-            self.caller.remote_call("hello_world_from_client", self.stat + 1, "这是一条默认消息")
+        try:
+            # 在实际应用中可以在这里处理服务器发来的各种消息
+            # 例如更新游戏状态、显示聊天消息等
+            
+            print("\n可用命令: [send] 发送新消息, [exit] 退出")
+            user_input = input("请输入命令: ")
+            if user_input.lower() == 'exit':
+                self.logger.info('客户端发送退出请求')
+                self.caller.remote_call("exit")
+            elif user_input.lower() == 'send':
+                message = input("请输入要发送的消息: ")
+                self.logger.info(f'客户端发送新消息: {message}')
+                self.caller.remote_call("hello_world_from_client", self.stat + 1, message)
+            else:
+                self.logger.info('未知命令，使用默认消息')
+                self.caller.remote_call("hello_world_from_client", self.stat + 1, "这是一条默认消息")
+        except Exception as e:
+            self.logger.error(f"处理服务器消息时出错: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
     
     @EXPOSED
     def exit_confirmed(self):
@@ -105,16 +110,26 @@ def main():
         
         # 主循环
         while client_entity.running:
-            # 处理网络事件
-            sock.process()
-            
-            # 接收数据
-            recv_data = sock.recv()
-            if len(recv_data) > 0:
-                logger.info(f"收到服务器数据: {len(recv_data)} 字节")
-                client_entity.caller.parse_rpc(recv_data)
-            
-            time.sleep(0.1)
+            try:
+                # 检查连接状态
+                if sock.status() != conf.NET_STATE_ESTABLISHED:
+                    logger.error("与服务器的连接已断开")
+                    break
+                # 处理网络事件
+                sock.process()
+                
+                # 接收数据
+                recv_data = sock.recv()
+                if len(recv_data) > 0:
+                    logger.info(f"收到服务器数据: {len(recv_data)} 字节")
+                    client_entity.caller.parse_rpc(recv_data)
+                
+                time.sleep(0.1)
+            except Exception as e:
+                logger.error(f"客户端主循环中出现错误: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
+                break
         
         # 清理资源
         client_entity.destroy()

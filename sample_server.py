@@ -80,8 +80,19 @@ class MyGameServer(SimpleServer):
     def on_client_data(self, client_id, data):
         """处理来自客户端的数据"""
         if client_id in self.clients:
-            self.logger.debug(f"收到客户端 {client_id} 数据: {len(data)} 字节")
-            self.clients[client_id].caller.parse_rpc(data)
+            try:
+                self.logger.debug(f"收到客户端 {client_id} 数据: {len(data)} 字节")
+                # 获取客户端实体
+                client_entity = self.clients[client_id]
+                # 确保实体和RPC代理有效
+                if client_entity and client_entity.caller:
+                    client_entity.caller.parse_rpc(data)
+                else:
+                    self.logger.warning(f"客户端 {client_id} 的实体或RPC代理无效")
+            except Exception as e:
+                self.logger.error(f"处理客户端 {client_id} 数据时出错: {str(e)}")
+                import traceback
+                self.logger.error(traceback.format_exc())
 
 if __name__ == "__main__":
     # 解析命令行参数
