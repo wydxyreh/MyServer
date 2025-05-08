@@ -57,3 +57,27 @@ def hello_world_from_client(self, stat, msg):
 消息传递不论是基于Events或者RPC,本质都是将信息转换为字节流，通过socket传输。所以客户端只需要按照同样的方式来处理字节流，即可正确获取传递来的消息，并进行相应处理。相关代码可以参考:
 >1.header.py `marshal`/`unmarshal` (基于Events)
 >2.netStream.py `RpcProxy`(Rpc)
+
+修改客户端与服务端交互逻辑，多个客户端通过多个函数调用来与服务端进行通信：
+1.客户端有client_login函数，传入形参分别为账号和密码，每次客户端连接到服务端时，服务端强制且优先调用该函数，然后服务端会对账号密码进行验证（与存储在数据库中的账号密码进行比对），验证通过后，将账密加上随机数进行哈希（函数化），返回一个token（唯一）给客户端作为临时身份ID，后续每次客户端与服务端在该次连接下的会话只需要验证该token即可，并且每次连接断开后，token都失效。（客户端的client_login调用传入的账密以全局变量的形式提供）
+2.客户端有userdata_load和userdata_save两个函数，将以JSON格式存储的数据从客户端传递给服务端，服务端接收到后对JSON数据进行解析，获取解析后的userdata（函数化），并将对应的数据存储到数据库中。注意，每个客户端的相关JSON数据在数据库中都是与其账号密码信息绑定的，即可以根据账密唯一地从数据库中读取到相关userdata数据。
+如：
+{
+name:wydx
+bullet:20
+exp:23
+}
+对于数据库，使用python3标准库自带的sqlite进行连接，在服务器数据中内建好三个账号：netease1,netease2,netease3,密码都是123；
+
+
+
+优化
+C:\Users\wydx\Documents\Unreal Projects\Server\sample_server.py
+C:\Users\wydx\Documents\Unreal Projects\Server\sample_client.py
+1.对于客户端，其逻辑处理
+
+包括但不限于：
+1.将其中的print改为logging；
+2.优化其登录逻辑，添加各种错误处理，并提高鲁棒性；
+3.优化服务端客户端性能
+4.将其进行模块化设计和整合，降低各个模块和函数的耦合度

@@ -6,6 +6,10 @@ import gc
 import weakref
 from collections import defaultdict
 from functools import partial
+import json
+import threading
+import signal
+import traceback
 
 # 添加当前目录到Python路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -14,12 +18,16 @@ from server.simpleServer import SimpleServer
 from server.network.netStream import RpcProxy
 from server.common.timer import TimerManager
 from server.common import conf
+from server.common.db_manager import db_manager
+from server.common.logger import logger_instance
 
 def EXPOSED(func):
+    """标记允许远程调用的方法的装饰器"""
     func.__exposed__ = True
     return func
 
 class GameServerEntity:
+    """游戏服务器实体类，处理单个客户端连接和逻辑"""
     EXPOSED_FUNC = {}
     
     def __init__(self, netstream, server):
@@ -32,19 +40,291 @@ class GameServerEntity:
         self.last_activity_time = time.time()
         # 用于批量处理的消息队列
         self.pending_messages = []
-        self.logger.info(f"创建新的游戏实体 ID: {self.id}")
         
+        # 认证相关
+        self.authenticated = False
+        self.username = None
+        self.token = None
+        self.login_attempts = 0
+        self.max_login_attempts = 5  # 最大登录尝试次数
+        self.login_timeout = 15.0    # 登录超时秒数
+        self.login_request_time = 0  # 登录请求时间戳
+        
+        # IP地址信息
+        self.ip_address = self._get_ip_address(netstream)
+        
+        self.logger.info(f"创建新的游戏实体 ID: {self.id}, IP: {self.ip_address}")
+        
+        # 连接后强制客户端先登录
+        self._request_login()
+        
+    def _get_ip_address(self, netstream):
+        """获取客户端IP地址"""
+        try:
+            if hasattr(netstream, "peername") and netstream.peername:
+                return netstream.peername[0]
+        except (IndexError, TypeError):
+            pass
+        return "unknown"
+        
+    def _request_login(self):
+        """请求客户端登录并设置登录超时检查"""
+        self.login_request_time = time.time()
+        try:
+            # 使用安全的计时器来检查登录状态
+            timer = threading.Timer(self.login_timeout, self._check_login_status)
+            timer.daemon = True  # 设为守护线程，主程序退出时自动关闭
+            timer.start()
+            self.caller.remote_call("login_required")
+            self.logger.debug(f"已向客户端 {self.id} 发送登录请求")
+        except Exception as e:
+            self._log_error("发送登录请求时出错", e)
+        
+    def _check_login_status(self):
+        """检查登录状态，如果仍未登录则断开连接"""
+        try:
+            if not self.authenticated and hasattr(self, 'netstream') and self.netstream:
+                elapsed = time.time() - self.login_request_time
+                self.logger.warning(f"客户端 {self.id} 未在规定时间({elapsed:.1f}秒)内登录，断开连接")
+                self._request_client_removal()
+        except Exception as e:
+            self._log_error("检查登录状态时出错", e)
+    
+    def _log_error(self, message, exception=None):
+        """统一的错误日志记录方法"""
+        error_msg = f"{message}: {str(exception)}" if exception else message
+        self.logger.error(f"客户端 {self.id} {error_msg}")
+        if exception:
+            self.logger.error(traceback.format_exc())
+    
+    def _request_client_removal(self):
+        """请求服务器移除此客户端"""
+        if hasattr(self, 'server') and self.server and hasattr(self, 'netstream') and self.netstream:
+            try:
+                self.server.mark_client_for_removal(self.netstream.hid)
+            except Exception as e:
+                self._log_error("请求移除客户端时出错", e)
+
+    def _send_client_response(self, method, *args):
+        """安全地发送响应到客户端"""
+        try:
+            if hasattr(self, 'caller') and self.caller:
+                self.caller.remote_call(method, *args)
+                return True
+        except Exception as e:
+            self._log_error(f"发送响应 '{method}' 到客户端时出错", e)
+        return False
+
     def destroy(self):
-        self.logger.info(f"销毁游戏实体 ID: {self.id}")
-        if self.caller:
-            self.caller.close()  # 确保正确关闭RPC代理
-        self.caller = None
-        self.netstream = None
+        """销毁实体并清理资源"""
+        try:
+            self.logger.info(f"销毁游戏实体 ID: {self.id}, IP: {self.ip_address}")
+            
+            # 若已认证，使token失效
+            if self.authenticated and self.token:
+                db_manager.invalidate_token(self.token)
+                self.logger.debug(f"使用户 {self.username} 的令牌失效")
+                
+            if hasattr(self, 'caller') and self.caller:
+                self.caller.close()  # 确保正确关闭RPC代理
+            
+            # 清理对象引用
+            self.caller = None
+            self.netstream = None
+        except Exception as e:
+            self._log_error("销毁游戏实体时出错", e)
+    
+    def update_activity_time(self):
+        """更新最后活动时间"""
+        self.last_activity_time = time.time()
+    
+    def _verify_token(self):
+        """验证用户令牌"""
+        if not self.token:
+            return False
+            
+        username = db_manager.validate_token(self.token)
+        return username == self.username
         
+    def _verify_auth(self, operation_name):
+        """验证用户是否已认证，如未认证则发送错误消息"""
+        self.update_activity_time()
+        if not self.authenticated:
+            self.logger.warning(f"未认证客户端 {self.id} 尝试进行 {operation_name} 操作")
+            self._send_client_response("auth_error", "请先登录")
+            return False
+        return True
+        
+    def _verify_auth_with_token(self, operation_name):
+        """验证用户认证状态和令牌有效性"""
+        if not self._verify_auth(operation_name):
+            return False
+        
+        if not self._verify_token():
+            self.logger.warning(f"客户端 {self.id} 的令牌已失效")
+            self._send_client_response("auth_error", "会话已过期，请重新登录")
+            return False
+        return True
+    
+    @EXPOSED
+    def client_login(self, username, password):
+        """处理客户端登录请求"""
+        try:
+            self.update_activity_time()
+            
+            # 输入验证
+            if not username or not password:
+                self.logger.warning(f"客户端 {self.id} 提供无效的登录凭据: 用户名或密码为空")
+                self._send_client_response("login_failed", "用户名和密码不能为空")
+                return
+                
+            # 避免日志中记录密码信息
+            self.logger.info(f"客户端 {self.id} 尝试登录: {username}")
+            
+            # 检查登录次数限制
+            if self.login_attempts >= self.max_login_attempts:
+                self.logger.warning(f"客户端 {self.id} (IP: {self.ip_address}) 登录尝试次数过多，将被断开连接")
+                self._send_client_response("login_failed", "登录尝试次数过多，请稍后再试")
+                self._request_client_removal()
+                return
+                
+            # 增加登录尝试计数
+            self.login_attempts += 1
+            
+            # 防止空密码
+            if not password or len(password) < 1:
+                self.logger.warning(f"客户端 {self.id} 尝试使用空密码登录")
+                self._send_client_response("login_failed", "密码不能为空")
+                return
+                
+            # 验证账号密码
+            token = db_manager.authenticate(username, password)
+            
+            if token:
+                # 处理登录成功
+                self._handle_successful_login(username, token)
+            else:
+                # 登录失败
+                self.logger.warning(f"客户端 {self.id} (IP: {self.ip_address}) 登录失败: {username}")
+                self._send_client_response("login_failed", "用户名或密码错误")
+                
+        except Exception as e:
+            self._log_error("处理登录请求时出错", e)
+            self._send_client_response("login_failed", "登录过程中发生错误")
+    
+    def _handle_successful_login(self, username, token):
+        """处理成功的登录请求"""
+        try:
+            # 检查该用户是否已经在其他客户端登录
+            existing_client = self.server.find_client_by_username(username)
+            if existing_client and existing_client != self:
+                self._handle_existing_login(existing_client)
+            
+            # 登录成功
+            self.authenticated = True
+            self.username = username
+            self.token = token
+            self.logger.info(f"客户端 {self.id} (IP: {self.ip_address}) 登录成功: {username}")
+            
+            # 发送登录成功消息
+            self._send_client_response("login_success", token)
+            
+            # 注册到用户名索引
+            self.server.register_authenticated_client(username, self)
+            
+            # 加载用户数据
+            self._load_user_data(username)
+            
+        except Exception as e:
+            self._log_error("处理成功登录过程中出错", e)
+            self._send_client_response("login_failed", "登录后处理数据时出错")
+
+    def _handle_existing_login(self, existing_client):
+        """处理已存在的登录会话"""
+        self.logger.warning(f"用户 {existing_client.username} 已在其他客户端登录，强制断开旧连接")
+        # 告知旧客户端被踢出
+        try:
+            existing_client._send_client_response("kicked", "您的账号在其他设备登录")
+        except:
+            pass
+        # 强制断开旧连接
+        existing_client._request_client_removal()
+    
+    def _load_user_data(self, username):
+        """加载用户数据"""
+        user_data = db_manager.load_user_data(username)
+        if user_data:
+            self._send_client_response("userdata_update", user_data)
+        else:
+            self.logger.warning(f"用户 {username} 无用户数据")
+            # 创建空的用户数据结构
+            empty_data = json.dumps({"name": username})
+            db_manager.save_user_data(username, empty_data)
+            self._send_client_response("userdata_update", empty_data)
+    
+    @EXPOSED
+    def userdata_load(self):
+        """加载用户数据"""
+        if not self._verify_auth_with_token("数据加载"):
+            return
+        
+        # 加载用户数据
+        user_data = db_manager.load_user_data(self.username)
+        if user_data:
+            self.logger.info(f"为用户 {self.username} 加载数据")
+            self._send_client_response("userdata_update", user_data)
+        else:
+            self.logger.warning(f"无法加载用户 {self.username} 的数据")
+            self._send_client_response("data_error", "加载数据失败")
+    
+    @EXPOSED
+    def userdata_save(self, data_json):
+        """保存用户数据"""
+        if not self._verify_auth_with_token("数据保存"):
+            return
+        
+        # 保存数据
+        try:
+            # 验证并处理JSON数据
+            data_json = self._validate_json_data(data_json)
+            if data_json is None:  # 验证失败
+                return
+                
+            success = db_manager.save_user_data(self.username, data_json)
+            
+            if success:
+                self.logger.info(f"成功保存用户 {self.username} 的数据")
+                self._send_client_response("save_success")
+            else:
+                self.logger.warning(f"保存用户 {self.username} 的数据失败")
+                self._send_client_response("data_error", "保存数据失败")
+                
+        except Exception as e:
+            self._log_error("保存数据时出错", e)
+            self._send_client_response("data_error", f"保存数据时出错: {str(e)}")
+    
+    def _validate_json_data(self, data):
+        """验证JSON数据格式"""
+        try:
+            if isinstance(data, str):
+                # 尝试验证JSON格式
+                json.loads(data)
+                return data
+            else:
+                # 如果不是字符串，尝试转换为JSON字符串
+                return json.dumps(data)
+                
+        except json.JSONDecodeError:
+            self.logger.error(f"无效的JSON数据格式")
+            self._send_client_response("data_error", "无效的数据格式")
+            return None
+    
     @EXPOSED
     def hello_world_from_client(self, stat, msg):
         """处理来自客户端的问候"""
-        self.last_activity_time = time.time()
+        if not self._verify_auth("发送消息"):
+            return
+            
         # 将消息添加到队列，而不是立即处理
         self.pending_messages.append(("hello", stat, msg))
         
@@ -54,10 +334,13 @@ class GameServerEntity:
             return
             
         for msg_type, *args in self.pending_messages:
-            if msg_type == "hello":
-                stat, msg = args
-                self.logger.info(f'服务器收到客户端消息: stat={stat}, msg={msg}, 客户端ID: {self.id}')
-                self.caller.remote_call("recv_msg_from_server", stat + 1, f"服务器已收到: {msg}")
+            try:
+                if msg_type == "hello":
+                    stat, msg = args
+                    self.logger.info(f'服务器收到客户端消息: stat={stat}, msg={msg}, 客户端ID客户端ID: {self.id}, 用户: {self.username}')
+                    self._send_client_response("recv_msg_from_server", stat + 1, f"服务器已收到: {msg}")
+            except Exception as e:
+                self._log_error("处理消息时出错", e)
                 
         # 清空消息队列
         self.pending_messages = []
@@ -65,23 +348,31 @@ class GameServerEntity:
     @EXPOSED
     def exit(self):
         """处理客户端的退出请求"""
-        self.last_activity_time = time.time()
-        self.logger.info(f'服务器收到客户端退出请求, 客户端ID: {self.id}')
-        self.caller.remote_call("exit_confirmed")
+        self.update_activity_time()
+        self.logger.info(f'服务器收到客户端退出请求, 客户端ID: {self.id}, 用户: {self.username if self.authenticated else "未登录"}')
+        
+        # 使token失效
+        if self.authenticated and self.token:
+            db_manager.invalidate_token(self.token)
+            
+        self._send_client_response("exit_confirmed")
         # 将客户端标记为待移除
-        self.server.mark_client_for_removal(self.netstream.hid)
+        self._request_client_removal()
 
 class MyGameServer(SimpleServer):
+    """游戏服务器类"""
     _id_counter = 0
     
     def __init__(self):
         super(MyGameServer, self).__init__()
         # 使用单例日志系统
-        from server.common.logger import logger_instance
         self.logger = logger_instance.get_logger('GameServer')
         self.log_file = logger_instance._log_files.get('GameServer', '')
         self.logger.info("游戏服务器初始化")
-        self.clients = {}  # 存储客户端实体
+        
+        # 客户端管理
+        self.clients = {}  # 存储客户端实体 {client_id: entity}
+        self.clients_by_username = {}  # 按用户名索引客户端 {username: entity}
         self.clients_to_remove = set()  # 存储待移除的客户端ID
         
         # 性能监控
@@ -115,44 +406,109 @@ class MyGameServer(SimpleServer):
         TimerManager.addRepeatTimer(0.1, self.on_low_frequency_tick)
     
     def generateEntityID(self):
+        """生成唯一的实体ID"""
         self._id_counter += 1
         return self._id_counter
         
+    def find_client_by_username(self, username):
+        """根据用户名查找客户端实体"""
+        return self.clients_by_username.get(username)
+        
+    def register_authenticated_client(self, username, client):
+        """注册已认证的客户端到用户名索引"""
+        if username and client:
+            self.clients_by_username[username] = client
+            
     def mark_client_for_removal(self, client_id):
         """标记客户端待移除，避免在迭代过程中修改clients字典"""
         self.clients_to_remove.add(client_id)
+    
+    def _log_error(self, message, exception=None):
+        """统一的错误日志记录方法"""
+        error_msg = f"{message}: {str(exception)}" if exception else message
+        self.logger.error(error_msg)
+        if exception:
+            self.logger.error(traceback.format_exc())
         
     def on_client_connected(self, client_id, client_stream):
         """处理客户端连接事件"""
-        self.logger.info(f"新客户端连接: {client_id}")
-        # 创建客户端实体
-        client_entity = GameServerEntity(client_stream, self)
-        self.clients[client_id] = client_entity
+        try:
+            # 获取客户端IP地址
+            ip_address = "unknown"
+            if hasattr(client_stream, "peername") and client_stream.peername:
+                try:
+                    ip_address = client_stream.peername[0]
+                except (IndexError, TypeError):
+                    pass
+                    
+            self.logger.info(f"新客户端连接: ID={client_id}, IP={ip_address}")
+            
+            # 限制连接数量，防止DoS攻击
+            if len(self.clients) >= 100:  # 最大连接数限制
+                self.logger.warning(f"达到最大连接数量限制，拒绝客户端 {client_id} (IP: {ip_address})")
+                # 模拟关闭连接，实际上会在下一个tick中处理
+                self.mark_client_for_removal(client_id)
+                return
+                
+            # 创建客户端实体
+            client_entity = GameServerEntity(client_stream, self)
+            self.clients[client_id] = client_entity
+        except Exception as e:
+            self._log_error(f"处理客户端连接时出错", e)
+            # 确保在出错时仍然移除客户端
+            self.mark_client_for_removal(client_id)
         
     def on_client_disconnected(self, client_id):
         """处理客户端断开连接事件"""
-        self.logger.info(f"客户端断开连接: {client_id}")
-        self.mark_client_for_removal(client_id)
+        try:
+            client = self.clients.get(client_id)
+            if client:
+                self.logger.info(f"客户端断开连接: ID={client_id}, IP={client.ip_address}, " +
+                              f"用户={client.username if client.authenticated else '未登录'}")
+                
+                # 将客户端标记为待移除
+                self.mark_client_for_removal(client_id)
+            else:
+                self.logger.info(f"客户端断开连接: ID={client_id}")
+                self.mark_client_for_removal(client_id)
+        except Exception as e:
+            self._log_error(f"处理客户端断开连接时出错", e)
+            self.mark_client_for_removal(client_id)
             
     def on_client_data(self, client_id, data):
         """处理来自客户端的数据"""
         if client_id in self.clients:
             try:
+                client_entity = self.clients[client_id]
+                current_time = time.time()
+                
+                # 对还未认证的客户端强制限速
+                if not client_entity.authenticated:
+                    if current_time - client_entity.last_activity_time < 0.05:
+                        self.logger.warning(f"客户端 {client_id} 数据请求频率过高，可能是攻击行为")
+                        return  # 直接丢弃该请求
+                
+                # 更新活动时间
+                client_entity.update_activity_time()
+                
+                # 记录数据统计
                 data_size = len(data)
                 self.network_stats['bytes_received'] += data_size
                 self.network_stats['msgs_received'] += 1
                 
-                # 获取客户端实体
-                client_entity = self.clients[client_id]
+                # 限制单个客户端的数据大小
+                if data_size > 1024 * 1024:  # 1MB大小限制
+                    self.logger.warning(f"客户端 {client_id} 发送超大数据包 ({data_size} 字节)，可能是攻击行为")
+                    return
+                
                 # 确保实体和RPC代理有效
-                if client_entity and client_entity.caller:
+                if client_entity and hasattr(client_entity, 'caller') and client_entity.caller:
+                    # 尝试解析RPC调用
                     client_entity.caller.parse_rpc(data)
                 else:
                     self.logger.warning(f"客户端 {client_id} 的实体或RPC代理无效")
             except Exception as e:
-                self.logger.error(f"处理客户端 {client_id} 数据时出错: {str(e)}")
-                import traceback
-                self.logger.error(traceback.format_exc())
+                self._log_error(f"处理客户端 {client_id} 数据时出错", e)
     
     def on_high_frequency_tick(self):
         """1ms高频定时器回调 - 只处理网络IO"""
@@ -184,27 +540,72 @@ class MyGameServer(SimpleServer):
     
     def on_medium_frequency_tick(self):
         """10ms中频定时器回调 - 处理消息和实体状态"""
-        # 处理实体的消息队列
+        try:
+            self._process_entity_messages()
+            self._remove_marked_clients()
+        except Exception as e:
+            self._log_error(f"执行中频定时任务时出错", e)
+    
+    def _process_entity_messages(self):
+        """处理所有实体的消息队列"""
         for client_id, entity in list(self.clients.items()):
             try:
                 entity.process_messages()
+                
+                # 更新用户名索引 - 仅当实体已认证且未记录时
+                if entity.authenticated and entity.username and self.clients_by_username.get(entity.username) != entity:
+                    self.clients_by_username[entity.username] = entity
             except Exception as e:
-                self.logger.error(f"处理实体 {client_id} 消息时出错: {str(e)}")
-        
-        # 移除标记为待删除的客户端
-        if self.clients_to_remove:
-            for client_id in self.clients_to_remove:
-                if client_id in self.clients:
-                    self.clients[client_id].destroy()
-                    del self.clients[client_id]
-            self.clients_to_remove.clear()
+                self._log_error(f"处理实体 {client_id} 消息时出错", e)
+                # 处理过程中出错，标记移除该客户端
+                self.mark_client_for_removal(client_id)
+    
+    def _remove_marked_clients(self):
+        """移除所有标记为待删除的客户端"""
+        if not self.clients_to_remove:
+            return
+            
+        for client_id in self.clients_to_remove:
+            self._remove_client(client_id)
+        self.clients_to_remove.clear()
+    
+    def _remove_client(self, client_id):
+        """移除指定的客户端"""
+        if client_id not in self.clients:
+            return
+            
+        try:
+            client = self.clients[client_id]
+            
+            # 如果已认证，从用户名索引中移除
+            if client.authenticated and client.username in self.clients_by_username:
+                if self.clients_by_username[client.username] == client:
+                    del self.clients_by_username[client.username]
+            
+            # 销毁客户端实体
+            client.destroy()
+            del self.clients[client_id]
+        except Exception as e:
+            self._log_error(f"删除客户端 {client_id} 时出错", e)
+            # 确保即使出错也删除引用
+            if client_id in self.clients:
+                del self.clients[client_id]
     
     def on_low_frequency_tick(self):
         """100ms低频定时器回调 - 处理统计和其他非紧急任务"""
-        # 更新性能统计
+        self._update_performance_stats()
+        self._check_inactive_clients()
+        
+        # 执行垃圾回收
+        gc.collect()
+    
+    def _update_performance_stats(self):
+        """更新和记录性能统计信息"""
         self.tick_count += 1
         current_time = time.time()
-        if current_time - self.last_stats_time >= 10.0:  # 每10秒记录一次详细的统计信息
+        
+        # 每10秒记录一次详细的统计信息
+        if current_time - self.last_stats_time >= 10.0:
             elapsed = current_time - self.last_stats_time
             self.last_stats_time = current_time
             
@@ -225,45 +626,103 @@ class MyGameServer(SimpleServer):
                 'msgs_received': 0,
                 'msgs_sent': 0
             }
-            
-        # 检测不活跃的客户端
+    
+    def _check_inactive_clients(self):
+        """检查并移除不活跃的客户端"""
         current_time = time.time()
         inactive_threshold = 300  # 5分钟不活跃则断开
+        
         for client_id, entity in list(self.clients.items()):
             if current_time - entity.last_activity_time > inactive_threshold:
                 self.logger.warning(f"客户端 {client_id} 长时间不活跃，断开连接")
                 self.mark_client_for_removal(client_id)
-                
-        # 执行垃圾回收
-        gc.collect()
     
     def tick(self):
         """重写tick方法，使其更轻量级 - 主要流程由定时器处理"""
         # 运行定时器调度器
         TimerManager.scheduler()
 
+    def shutdown_all_clients(self, reason="服务器正在关闭"):
+        """优雅地关闭所有客户端连接"""
+        self.logger.info(f"通知所有客户端服务器关闭: {reason}")
+        for client_id, client in list(self.clients.items()):
+            try:
+                if client and hasattr(client, 'caller') and client.caller:
+                    client._send_client_response("server_shutdown", reason)
+            except Exception as e:
+                self.logger.warning(f"通知客户端 {client_id} 服务器关闭时出错: {str(e)}")
+
+def signal_handler(signum, frame):
+    """处理系统信号"""
+    logger = logger_instance.get_logger('SignalHandler')
+    signal_name = signal.Signals(signum).name if hasattr(signal, 'Signals') else f"Signal {signum}"
+    logger.info(f"接收到信号: {signal_name}")
+    
+    # 触发优雅退出
+    global should_exit
+    should_exit = True
+
 if __name__ == "__main__":
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='优化的游戏服务器')
     parser.add_argument('--port', type=int, default=2000, help='监听端口 (默认: 2000)')
+    parser.add_argument('--bind', default='0.0.0.0', help='绑定地址 (默认: 0.0.0.0)')
     args = parser.parse_args()
     
-    # 创建并初始化服务器
-    server = MyGameServer()
+    # 设置全局日志记录器
+    logger = logger_instance.get_logger('Main')
     
-    # 启动网络服务
-    server.host.startup(args.port)
-    server.logger.info(f"服务器已启动，正在监听端口 {args.port}...")
+    # 创建并初始化服务器
+    server = None
+    should_exit = False
     
     try:
-        # 导入需要的模块
-        from server.common import conf
+        # 注册信号处理器
+        if hasattr(signal, 'SIGINT'):
+            signal.signal(signal.SIGINT, signal_handler)
+        if hasattr(signal, 'SIGTERM'):
+            signal.signal(signal.SIGTERM, signal_handler)
         
-        # 主循环 - 极简设计，只运行定时器调度
-        while True:
-            server.tick()
-            time.sleep(0.001)  # 微小的延迟以减轻CPU负担
+        # 创建服务器实例
+        server = MyGameServer()
+        
+        # 启动网络服务
+        result = server.host.startup(args.port)
+        if result != 0:
+            logger.error(f"服务器启动失败，端口 {args.port} 可能已被占用")
+            sys.exit(1)
+            
+        logger.info(f"服务器已启动，正在监听 {args.bind}:{args.port}...")
+        
+        # 主循环 - 只运行定时器调度
+        while not should_exit:
+            try:
+                server.tick()
+                time.sleep(0.001)  # 微小的延迟以减轻CPU负担
+            except Exception as e:
+                logger.error(f"服务器主循环中发生错误: {str(e)}")
+                logger.error(traceback.format_exc())
+                # 考虑是否退出服务器
+                if should_exit:
+                    break
+                    
     except KeyboardInterrupt:
-        server.logger.info("接收到关闭信号，服务器正在关闭...")
-        server.host.shutdown()
-        server.logger.info("服务器已关闭。")
+        logger.info("接收到键盘中断，服务器正在关闭...")
+    except Exception as e:
+        logger.error(f"服务器运行时发生意外错误: {str(e)}")
+        logger.error(traceback.format_exc())
+    finally:
+        # 优雅关闭
+        if server:
+            logger.info("正在关闭服务器...")
+            # 通知所有客户端服务器将关闭
+            server.shutdown_all_clients()
+            
+            # 关闭网络服务
+            server.host.shutdown()
+            
+            # 清理资源
+            logger.info("正在清理资源...")
+            db_manager.cleanup()
+            
+        logger.info("服务器已完全关闭。")
