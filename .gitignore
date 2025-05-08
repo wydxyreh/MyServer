@@ -1,1 +1,3 @@
 server/common/__pycache__/
+server/__pycache__/
+server/network/__pycache__/

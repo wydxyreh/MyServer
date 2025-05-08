@@ -7,7 +7,7 @@
 #
 #=========================================================================
 
-from common import conf
+from server.common import conf
 import errno
 import socket
 import struct

@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 
 
-from common import conf
+from server.common import conf
 import time
 import socket
-from netStream import NetStream
+from server.network.netStream import NetStream
 
 
 class SimpleHost(object):

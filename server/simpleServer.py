@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
-from network.simpleHost import SimpleHost
-from dispatcher import Dispatcher
+from server.network.simpleHost import SimpleHost
+from server.dispatcher import Dispatcher
 
 class SimpleServer(object):
 	

@@ -4,12 +4,12 @@ import unittest
 import time
 
 
-from common import conf
-from common.events import MsgCSLogin, MsgCSMoveto
-from dispatcher import Service, Dispatcher
-from network.netStream import NetStream, RpcProxy
-from network.simpleHost import SimpleHost
-from common.timer import TimerManager
+from server.common import conf
+from server.common.events import MsgCSLogin, MsgCSMoveto
+from server.dispatcher import Service, Dispatcher
+from server.network.netStream import NetStream, RpcProxy
+from server.network.simpleHost import SimpleHost
+from server.common.timer import TimerManager
 
 
 class TestService(Service):
