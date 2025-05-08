@@ -178,7 +178,7 @@ class SimpleHost(object):
 			client.process()
 			while client.status() == conf.NET_STATE_ESTABLISHED:
 				data = client.recv()
-				if data == '':
+				if data == b'':  # 使用字节串比较而不是字符串
 					break
 				self.queue.append((conf.NET_CONNECTION_DATA, client.hid, data))
 				client.active = current

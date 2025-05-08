@@ -33,23 +33,38 @@ class RpcProxy(object):
 				self.logger.warning(f"尝试对已关闭的连接调用RPC: {funcname}")
 				return
 				
-			info = ""
+			info = b""  # 确保使用字节串
 			if netstream.use_protobuf:
-				from server.proto import sample_pb2
-				entity_message = sample_pb2.EntityMessage()
-				entity_message.funcname = funcname
-				entity_message.funcargs = json.dumps(args)
-				info = entity_message.SerializeToString()
+				try:
+					from server.proto import sample_pb2
+					entity_message = sample_pb2.EntityMessage()
+					entity_message.funcname = funcname
+					entity_message.funcargs = json.dumps(args)
+					info = entity_message.SerializeToString()
+					self.logger.debug(f"使用ProtoBuf序列化RPC调用: {funcname}, 参数: {args}")
+				except Exception as e:
+					self.logger.error(f"ProtoBuf序列化失败: {str(e)}")
+					# 回退到JSON格式
+					data = {
+						'method': funcname,
+						'args': args,
+					}
+					info = json.dumps(data).encode('utf-8')
 			else:
-				#not support key-value pairs
+				# 使用JSON格式
 				data = {
-					'method' : funcname,
-					'args' : args,
+					'method': funcname,
+					'args': args,
 				}
 				info = json.dumps(data).encode('utf-8')
+				self.logger.debug(f"使用JSON序列化RPC调用: {funcname}, 参数: {args}")
+				
+			self.logger.debug(f"发送RPC调用: {funcname}, 数据长度: {len(info)}")
 			netstream.send(info)
 		except Exception as e:
 			self.logger.error(f"RPC调用失败 {funcname}: {str(e)}")
+			import traceback
+			traceback.print_exc()
 
 	def parse_rpc(self, data):
 		try:
@@ -260,6 +275,11 @@ class NetStream(object):
 			return b''
 
 		size = struct.unpack(conf.NET_HEAD_LENGTH_FORMAT, rsize)[0]
+		if size <= 0:
+			# 处理无效的大小值
+			self.__recvRaw(conf.NET_HEAD_LENGTH_SIZE)  # 清除无效头
+			return b''
+			
 		if (len(self.recv_buf) < size):
 			return b''
 

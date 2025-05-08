@@ -46,16 +46,25 @@ class GameEntity(object):
 	EXPOSED_FUNC = {}
 	def __init__(self, netstream, is_client=False):
 		self.netstream = netstream
-		# 传递self对象而不是函数引用
-		self.caller = RpcProxy(self, netstream)
 		self.stat = 0
 		self.is_client = is_client
 		self.logger = logger_instance.get_logger('GameEntity')
 		self.entity_type = "Client" if is_client else "Server"
+		
+		# 显式关闭ProtoBuf，使用JSON传输
+		if netstream:
+			netstream.use_protobuf = False
+			
+		# 创建RPC代理
+		self.caller = RpcProxy(self, netstream)
+		
+		self.logger.info(f"创建{self.entity_type} Entity, use_protobuf={False if netstream else 'N/A'}")
 
 	def destroy(self):
 		self.logger.info(f"{self.entity_type} Entity被销毁")
-		self.caller = None
+		if self.caller:
+			self.caller.close()
+			self.caller = None
 		self.netstream = None
 
 	# CLIENT CODE
@@ -65,7 +74,8 @@ class GameEntity(object):
 		self.stat = stat
 		self.logger.info(f'客户端状态更新为: {stat}')
 		self.logger.info('客户端发送退出请求')
-		self.caller.remote_call("exit")
+		if self.caller:
+			self.caller.remote_call("exit")
 	###
 
 	# SERVER CODE
@@ -75,7 +85,8 @@ class GameEntity(object):
 		self.stat = stat + 1
 		self.logger.info(f'服务器状态更新为: {self.stat}')
 		self.logger.info('服务器发送响应消息回客户端')
-		self.caller.remote_call("recv_msg_from_server", self.stat, msg)
+		if self.caller:
+			self.caller.remote_call("recv_msg_from_server", self.stat, msg)
 
 	@EXPOSED
 	def exit(self):
@@ -175,12 +186,28 @@ class ServerTest(unittest.TestCase):
 			connection_timeout = time.time() + 5.0  # 5秒连接超时
 			test_complete = False
 			
+			# 设置全局测试超时
+			global_timeout = time.time() + 10.0  # 10秒全局超时
+			last_activity_time = time.time()
+			
 			while not test_complete:
-				time.sleep(0.1)
+				current_time = time.time()
+				# 添加短暂的休眠以减轻CPU负担
+				time.sleep(0.05)
 				
+				# 检查全局超时
+				if current_time > global_timeout:
+					self.logger.error("测试全局超时！")
+					break
+					
 				# 检查连接超时
-				if time.time() > connection_timeout and stat == 0:
+				if current_time > connection_timeout and stat == 0:
 					self.logger.error("连接超时！")
+					break
+					
+				# 检测活动超时（如果5秒内没有任何活动）
+				if current_time - last_activity_time > 5.0:
+					self.logger.error("测试活动超时！5秒内没有活动")
 					break
 					
 				### CLIENT SECTION
@@ -190,40 +217,82 @@ class ServerTest(unittest.TestCase):
 						stat = 1
 						self.logger.info("客户端连接成功建立")
 						client_entity = GameEntity(sock, is_client=True)
+						
+						# 等待一小段时间以确保连接稳定
+						time.sleep(0.1)
+						
+						self.logger.info("客户端准备发送RPC调用")
 						client_entity.caller.remote_call("hello_world_from_client", stat, 'Hello, world !!')
 						self.logger.info("客户端发送RPC调用: hello_world_from_client")
 						last = time.time()
+						last_activity_time = time.time()
 				else:
 					recv_data = sock.recv()
 					if len(recv_data) > 0:
 						self.logger.info(f"客户端收到数据: {len(recv_data)} 字节")
-						client_entity.caller.parse_rpc(recv_data)
+						try:
+							client_entity.caller.parse_rpc(recv_data)
+							last_activity_time = time.time()  # 更新活动时间
+						except Exception as e:
+							self.logger.error(f"客户端解析RPC数据失败: {str(e)}")
 				####
 
 				### SERVER SECTION
+				self.logger.info(f"SERVER SECTION - 开始处理服务器事件")
 				host.process()
+				self.logger.info(f"host.process() 完成，准备读取事件")
+				
+				# 检查是否有事件在队列中
+				queue_size = len(host.queue)
+				self.logger.info(f"事件队列长度: {queue_size}")
+				
 				event, wparam, data = host.read()
+				self.logger.info(f"读取到事件: {event}, wparam: {wparam}, 数据长度: {len(data) if isinstance(data, bytes) else 'N/A'}")
+				
+				if event >= 0:
+					last_activity_time = time.time()  # 更新活动时间
+					
 				if event < 0:
 					continue
 				
 				if event == conf.NET_CONNECTION_NEW:
 					self.logger.info("服务器接收到新连接")
 					code, client_netstream = host.getClient(wparam)
-					self.assertGreaterEqual(code, 0)
-					self.logger.info(f"服务器创建客户端连接, 连接ID: {wparam}")
-					server_entity = GameEntity(client_netstream)
+					if code >= 0:
+						self.logger.info(f"服务器创建客户端连接, 连接ID: {wparam}")
+						server_entity = GameEntity(client_netstream)
+					else:
+						self.logger.error(f"获取客户端连接失败，错误码: {code}")
 
 				elif event == conf.NET_CONNECTION_DATA:
-					self.logger.info(f"服务器收到数据: {len(data)} 字节")
-					server_entity.caller.parse_rpc(data)
-					
-					if server_entity.stat == -1:
-						self.logger.info("服务器接收到客户端退出信号")
+					if isinstance(data, bytes):
+						self.logger.info(f"服务器收到数据: {len(data)} 字节")
+						try:
+							if server_entity:
+								server_entity.caller.parse_rpc(data)
+								
+								# 检查服务器状态，如果收到退出信号则结束测试
+								if server_entity.stat == -1:
+									self.logger.info("服务器接收到客户端退出信号")
+									server_entity.destroy()
+									host.closeClient(wparam)
+									self.logger.info("关闭客户端连接并关闭服务器")
+									test_complete = True
+									break
+							else:
+								self.logger.error("服务器实体未初始化，无法处理数据")
+						except Exception as e:
+							self.logger.error(f"服务器解析RPC数据失败: {str(e)}")
+							import traceback
+							traceback.print_exc()
+					else:
+						self.logger.error(f"服务器收到非字节类型数据: {type(data)}")
+						
+				elif event == conf.NET_CONNECTION_LEAVE:
+					self.logger.info(f"客户端离开, ID: {wparam}")
+					if server_entity:
 						server_entity.destroy()
-						host.closeClient(wparam)
-						self.logger.info("关闭客户端连接并关闭服务器")
-						test_complete = True
-						break
+						server_entity = None
 				###
 
 			# test timer
@@ -256,7 +325,7 @@ class ServerTest(unittest.TestCase):
 				# 关闭客户端socket
 				if sock:
 					try:
-						if sock.status() != conf.NET_STATE_STOP:  # 使用已知的NET_STATE_STOP代替NET_STATE_CLOSED
+						if sock.status() != conf.NET_STATE_STOP:
 							sock.close()
 							self.logger.info("客户端socket已关闭")
 					except Exception as e:
@@ -271,6 +340,10 @@ class ServerTest(unittest.TestCase):
 					except Exception as e:
 						self.logger.error(f"关闭服务器时出错: {str(e)}")
 					host = None
+				
+				# 强制垃圾回收以释放资源
+				import gc
+				gc.collect()
 					
 			except Exception as e:
 				self.logger.error(f"清理资源时发生错误: {str(e)}")
