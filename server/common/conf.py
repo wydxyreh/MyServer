@@ -9,6 +9,7 @@ MSG_SC_MOVETO	= 0x2002
 NET_STATE_STOP	= 0				# state: init value
 NET_STATE_CONNECTING	= 1		# state: connecting
 NET_STATE_ESTABLISHED	= 2		# state: connected
+NET_STATE_CLOSED = 3            # state: closed connection
 
 NET_HEAD_LENGTH_SIZE	= 4		# 4 bytes little endian (x86)
 NET_HEAD_LENGTH_FORMAT	= '<I'

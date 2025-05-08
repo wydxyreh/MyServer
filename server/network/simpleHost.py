@@ -11,6 +11,9 @@ class SimpleHost(object):
 	
 	def __init__(self, timeout=conf.NET_HOST_DEFAULT_TIMEOUT):
 		super().__init__()
+		
+		from server.common.logger import logger_instance
+		self.logger = logger_instance.get_logger('SimpleHost')
 
 		self.host = 0
 		self.state = conf.NET_STATE_STOP
@@ -21,6 +24,11 @@ class SimpleHost(object):
 		self.sock = None
 		self.port = 0
 		self.timeout = timeout
+		
+		# 添加事件回调 
+		self.onConnected = None
+		self.onDisconnected = None
+		self.onData = None
 	
 	def generateID(self):
 		pos = -1

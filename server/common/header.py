@@ -13,7 +13,7 @@ class Header(object):
 		
 		#bfmt to be defined in subclass and be updated when recieve new data
 		self.bfmt = None
-		self.raw = ''
+		self.raw = b''  # 使用字节串而不是字符串
 
 		self.char_for_len = 'I'
 		self.offset = struct.calcsize(self.BYTES_ORDER + self.char_for_len)
@@ -25,7 +25,7 @@ class Header(object):
 
 		begin, elen, lst, fmt = 0, 0, [], self.bfmt
 		self.offset = struct.calcsize(self.BYTES_ORDER + self.char_for_len)
-		for i in xrange(x) :
+		for i in range(x) :
 			end = fmt.index('%', begin)
 			elen = elen + struct.calcsize(self.BYTES_ORDER + fmt[begin:end])
 			s = struct.unpack(self.BYTES_ORDER + self.char_for_len, raw[elen - self.offset:elen])[0]
@@ -40,7 +40,8 @@ class Header(object):
 		self.raw = struct.pack(self.hfmt, self.htype)
 		
 		ofmt, self.bfmt = self.bfmt, self.BYTES_ORDER + self.bfmt 
-		self.raw = self.raw + self.imarshal()
+		marshaled_data = self.imarshal()
+		self.raw = self.raw + marshaled_data
 		self.bfmt = ofmt
 
 		return self.raw 
@@ -99,6 +100,9 @@ class SimpleHeader(Header):
 				if not last_param:
 					values.append(len(v))
 					param_format.append(len(v))
+				# 转换字符串为字节串，以兼容Python 3的struct.pack
+				if isinstance(v, str):
+					v = v.encode('utf-8')
 				values.append(v)
 			last_param = pname
 
@@ -108,5 +112,12 @@ class SimpleHeader(Header):
 		for i in range(len(record)):
 			pname = self.params_name[i]
 			if pname:
-				self.__setattr__(pname, record[i])
+				value = record[i]
+				# 如果值是字节串，尝试解码为字符串
+				if isinstance(value, bytes):
+					try:
+						value = value.decode('utf-8')
+					except UnicodeDecodeError:
+						pass  # 保持为字节串
+				self.__setattr__(pname, value)
 

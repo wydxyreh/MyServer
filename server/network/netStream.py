@@ -13,70 +13,103 @@ import socket
 import struct
 import json
 
+from server.common.logger import logger_instance
 
 class RpcProxy(object):
 	def __init__(self, owner, netstream):
 		self.owner = owner
 		self.netstream = netstream
+		self.logger = logger_instance.get_logger('RpcProxy')
 
 	def close(self):
 		self.owner = None
 		self.netstream = None
 
 	def remote_call(self, funcname, *args):
-		info = ""
-		if self.netstream.use_protobuf:
-			from proto import sample_pb2
-			entity_message = sample_pb2.EntityMessage()
-			entity_message.funcname = funcname
-			entity_message.funcargs = json.dumps(args)
-			info = entity_message.SerializeToString()
-		else:
-			#not support key-value pairs
-			data = {
-				'method' : funcname,
-				'args' : args,
-			}
-			info = json.dumps(data).encode('utf-8')
-		self.netstream and self.netstream.send(info)
+		try:
+			# 直接使用netstream对象
+			netstream = self.netstream
+			if not netstream:
+				self.logger.warning(f"尝试对已关闭的连接调用RPC: {funcname}")
+				return
+				
+			info = ""
+			if netstream.use_protobuf:
+				from server.proto import sample_pb2
+				entity_message = sample_pb2.EntityMessage()
+				entity_message.funcname = funcname
+				entity_message.funcargs = json.dumps(args)
+				info = entity_message.SerializeToString()
+			else:
+				#not support key-value pairs
+				data = {
+					'method' : funcname,
+					'args' : args,
+				}
+				info = json.dumps(data).encode('utf-8')
+			netstream.send(info)
+		except Exception as e:
+			self.logger.error(f"RPC调用失败 {funcname}: {str(e)}")
 
 	def parse_rpc(self, data):
-		func = None
-		args = []
-
-		if self.netstream.use_protobuf:
-			from proto import sample_pb2
-			entity_message = sample_pb2.EntityMessage()
-			entity_message.ParseFromString(data)
-
-			method = entity_message.funcname
-			args = json.loads(entity_message.funcargs)
-
-			func = getattr(self.owner, method, None)
-		else:
-			info = json.loads(data.decode('utf-8'))
-			method = info.get('method', None)
-			if method is None:
+		try:
+			func = None
+			args = []
+			owner = self.owner
+			netstream = self.netstream
+			
+			if not owner or not netstream:
+				self.logger.warning("尝试解析RPC时，发现对象已被回收")
 				return
-
-			func = getattr(self.owner, method, None)
-			args = info["args"]
-		if func:
-			if getattr(func, '__exposed__', False):
-				func(*args)
+				
+			if netstream.use_protobuf:
+				try:
+					from server.proto import sample_pb2
+					entity_message = sample_pb2.EntityMessage()
+					entity_message.ParseFromString(data)
+					method = entity_message.funcname
+					args = json.loads(entity_message.funcargs)
+				except Exception as e:
+					self.logger.error(f"ProtoBuf解析失败: {str(e)}")
+					return
+					
+				func = getattr(owner, method, None)
 			else:
-				print('invalid rpc call, NOT PERMITTED:', method)
-		else:
-			print('invalid rpc call, NOT EXSIT:', method)
+				try:
+					info = json.loads(data.decode('utf-8'))
+					method = info.get('method', None)
+					if method is None:
+						self.logger.warning("收到无效RPC请求: 缺少method字段")
+						return
+					args = info.get("args", [])
+				except json.JSONDecodeError as e:
+					self.logger.error(f"JSON解析失败: {str(e)}")
+					return
+					
+				func = getattr(owner, method, None)
+				
+			if func:
+				if getattr(func, '__exposed__', False):
+					try:
+						func(*args)
+					except Exception as e:
+						self.logger.error(f"RPC方法 {method} 执行失败: {str(e)}")
+				else:
+					self.logger.warning(f'无效RPC调用，未授权方法: {method}')
+			else:
+				self.logger.warning(f'无效RPC调用，方法不存在: {method}')
+		except Exception as e:
+			self.logger.error(f"RPC解析过程中发生错误: {str(e)}")
 
 
 class NetStream(object):
 	def __init__(self):
 		super(NetStream, self).__init__()
-
+		
+		self.logger = logger_instance.get_logger('NetStream')
 		self.sock = None		# socket object
-		self.send_buf = ''		# send buffer
-		self.recv_buf = ''		# recv buffer
+		self.send_buf = b''		# send buffer (bytes)
+		self.recv_buf = b''		# recv buffer (bytes)
 
 		self.state = conf.NET_STATE_STOP
 		self.errd = (errno.EINPROGRESS, errno.EALREADY, errno.EWOULDBLOCK)
@@ -97,8 +130,8 @@ class NetStream(object):
 		self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 		self.sock.connect_ex((address, port))
 		self.state = conf.NET_STATE_CONNECTING
-		self.send_buf = ''
-		self.recv_buf = ''
+		self.send_buf = b''
+		self.recv_buf = b''
 		self.errc = 0
 
 		return 0
@@ -110,11 +143,19 @@ class NetStream(object):
 		if not self.sock:
 			return 0
 		try:
+			# 确保socket被关闭前先关闭所有方向的数据传输
+			try:
+				self.sock.shutdown(socket.SHUT_RDWR)
+			except:
+				pass
 			self.sock.close()
-		except:
-			pass	#should logging here
+		except Exception as e:
+			import sys
+			print(f"关闭socket时出错: {str(e)}", file=sys.stderr)
 
 		self.sock = None
+		self.send_buf = b''
+		self.recv_buf = b''
 
 		return 0
 	
@@ -126,8 +167,8 @@ class NetStream(object):
 		self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 		self.state = conf.NET_STATE_ESTABLISHED
 		
-		self.send_buf = ''
-		self.recv_buf = ''
+		self.send_buf = b''
+		self.recv_buf = b''
 
 		return 0
 	
@@ -168,7 +209,7 @@ class NetStream(object):
 				return 0
 			if code in self.errd:
 				self.state = conf.NET_STATE_ESTABLISHED
-				self.recv_buf = ''
+				self.recv_buf = b''
 				return 1
 			
 			self.close()
@@ -216,11 +257,11 @@ class NetStream(object):
 	def recv(self):
 		rsize = self.__peekRaw(conf.NET_HEAD_LENGTH_SIZE)
 		if (len(rsize) < conf.NET_HEAD_LENGTH_SIZE):
-			return ''
+			return b''
 
 		size = struct.unpack(conf.NET_HEAD_LENGTH_FORMAT, rsize)[0]
 		if (len(self.recv_buf) < size):
-			return ''
+			return b''
 
 		self.__recvRaw(conf.NET_HEAD_LENGTH_SIZE)
 
@@ -228,9 +269,9 @@ class NetStream(object):
 
 	# try to receive all the data into recv_buf
 	def __tryRecv(self):
-		rdata = ''
+		rdata = b''
 		while 1:
-			text = ''
+			text = b''
 			try:
 				text = self.sock.recv(1024)
 				if not text:
@@ -244,7 +285,7 @@ class NetStream(object):
 					self.errc = code
 					self.close()
 					return -1
-			if text == '':
+			if text == b'':
 				break
 
 			rdata = rdata + text
@@ -256,7 +297,7 @@ class NetStream(object):
 	def __peekRaw(self, size):
 		self.process()
 		if len(self.recv_buf) == 0:
-			return ''
+			return b''
 
 		if size > len(self.recv_buf):
 			size = len(self.recv_buf)
