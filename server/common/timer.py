@@ -4,7 +4,8 @@ import heapq
 import time
 
 class CallLater(object):
-	"""Calls a function at a later time.
+	"""
+	Calls a function at a later time.
 	"""
 	def __init__(self, seconds, target, *args, **kwargs):
 		super().__init__()
@@ -17,8 +18,14 @@ class CallLater(object):
 		self.cancelled = False
 		self.timeout = time.time() + self._delay
 
+	def __lt__(self, other):
+		return self.timeout < other.timeout
+		
 	def __le__(self, other):
 		return self.timeout <= other.timeout
+		
+	def __eq__(self, other):
+		return self.timeout == other.timeout
 
 	def call(self):
 		try:
