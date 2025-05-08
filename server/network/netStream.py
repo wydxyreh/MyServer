@@ -37,7 +37,7 @@ class RpcProxy(object):
 				'method' : funcname,
 				'args' : args,
 			}
-			info = json.dumps(data)
+			info = json.dumps(data).encode('utf-8')
 		self.netstream and self.netstream.send(info)
 
 	def parse_rpc(self, data):
@@ -54,7 +54,7 @@ class RpcProxy(object):
 
 			func = getattr(self.owner, method, None)
 		else:
-			info = json.loads(data)
+			info = json.loads(data.decode('utf-8'))
 			method = info.get('method', None)
 			if method is None:
 				return
@@ -162,7 +162,8 @@ class NetStream(object):
 			return -1
 		try:
 			self.sock.recv(0)
-		except socket.error, (code, strerror):
+		except socket.error as e:
+			code = e.errno
 			if code in self.conn:
 				return 0
 			if code in self.errd:
@@ -200,7 +201,8 @@ class NetStream(object):
 
 		try:
 			wsize = self.sock.send(self.send_buf)
-		except socket.error, (code, strerror):
+		except socket.error as e:
+			code = e.errno
 			if not code in self.errd:
 				self.errc = code
 				self.close()
@@ -236,7 +238,8 @@ class NetStream(object):
 					self.close()
 
 					return -1
-			except socket.error, (code, strerror):
+			except socket.error as e:
+				code = e.errno
 				if not code in self.errd:
 					self.errc = code
 					self.close()
@@ -268,4 +271,3 @@ class NetStream(object):
 		self.recv_buf = self.recv_buf[size:]
 
 		return rdata
-
