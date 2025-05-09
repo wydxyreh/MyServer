@@ -141,10 +141,19 @@ class GameServerEntity:
     def _verify_token(self):
         """验证用户令牌"""
         if not self.token:
+            self.logger.warning(f"客户端 {self.id} 请求操作但无token")
             return False
             
-        username = db_manager.validate_token(self.token)
-        return username == self.username
+        # 通过数据库管理器验证token，同时验证client_id
+        username = db_manager.validate_token(self.token, self.id)
+        
+        # 确保token对应的用户名与当前认证的用户名一致
+        is_valid = username is not None and username == self.username
+        
+        if not is_valid and username is not None:
+            self.logger.warning(f"客户端 {self.id} 提供了有效token但用户名不匹配: 期望={self.username}, 实际={username}")
+            
+        return is_valid
         
     def _verify_auth(self, operation_name):
         """验证用户是否已认证，如未认证则发送错误消息"""
@@ -160,8 +169,11 @@ class GameServerEntity:
         if not self._verify_auth(operation_name):
             return False
         
+        # 严格验证token - 确保每次操作前都验证token的有效性
         if not self._verify_token():
-            self.logger.warning(f"客户端 {self.id} 的令牌已失效")
+            self.authenticated = False  # 重置认证状态
+            self.token = None  # 清除无效token
+            self.logger.warning(f"客户端 {self.id} 的令牌无效或已过期")
             self._send_client_response("auth_error", "会话已过期，请重新登录")
             return False
         return True
@@ -172,40 +184,41 @@ class GameServerEntity:
         try:
             self.update_activity_time()
             
-            # 输入验证
-            if not username or not password:
-                self.logger.warning(f"客户端 {self.id} 提供无效的登录凭据: 用户名或密码为空")
-                self._send_client_response("login_failed", "用户名和密码不能为空")
+            # 安全检查 - 防止空值或非法值
+            if not username or not isinstance(username, str) or not password or not isinstance(password, str):
+                self.logger.warning(f"客户端 {self.id} 提供无效凭据格式")
+                self._send_client_response("login_failed", "无效的用户名或密码格式")
                 return
                 
-            # 避免日志中记录密码信息
-            self.logger.info(f"客户端 {self.id} 尝试登录: {username}")
+            # 输入长度验证
+            if len(username) > 32 or len(password) > 64:
+                self.logger.warning(f"客户端 {self.id} 提供超长的用户名或密码")
+                self._send_client_response("login_failed", "用户名或密码格式错误")
+                return
+                
+            # 记录登录尝试（不记录密码）
+            self.logger.info(f"客户端 {self.id} 尝试认证: {username}")
             
-            # 检查登录次数限制
+            # 检查登录次数限制（防止暴力破解）
             if self.login_attempts >= self.max_login_attempts:
-                self.logger.warning(f"客户端 {self.id} (IP: {self.ip_address}) 登录尝试次数过多，将被断开连接")
-                self._send_client_response("login_failed", "登录尝试次数过多，请稍后再试")
+                self.logger.warning(f"客户端 {self.id} (IP: {self.ip_address}) 认证尝试次数过多")
+                self._send_client_response("login_failed", "认证尝试次数过多，请稍后再试")
                 self._request_client_removal()
                 return
                 
             # 增加登录尝试计数
             self.login_attempts += 1
             
-            # 防止空密码
-            if not password or len(password) < 1:
-                self.logger.warning(f"客户端 {self.id} 尝试使用空密码登录")
-                self._send_client_response("login_failed", "密码不能为空")
-                return
-                
-            # 验证账号密码
-            token = db_manager.authenticate(username, password)
+            # 认证过程 - 确保只有认证成功才会获得token，并传入client_id
+            # 使用self.id作为client标识，便于追踪token与客户端的关联
+            token = db_manager.authenticate(username, password, self.id)
             
             if token:
-                # 处理登录成功
+                # 处理认证成功
                 self._handle_successful_login(username, token)
             else:
-                # 登录失败
-                self.logger.warning(f"客户端 {self.id} (IP: {self.ip_address}) 登录失败: {username}")
+                # 认证失败
+                self.logger.warning(f"客户端 {self.id} (IP: {self.ip_address}) 认证失败: {username}")
                 self._send_client_response("login_failed", "用户名或密码错误")
                 
         except Exception as e:

@@ -96,20 +96,20 @@ class ClientNetworkManager:
             
         try:
             self.connection_state = "connecting"
-            self.logger.info(f"尝试连接到服务器: {self.host}:{self.port}")
+            self.logger.info(f"尝试连接服务器: {self.host}:{self.port}")
             
             # 先尝试DNS解析
             try:
                 socket.getaddrinfo(self.host, self.port)
             except socket.gaierror as e:
-                self.logger.error(f"无法解析服务器地址: {self.host}, 错误: {str(e)}")
+                self.logger.error(f"DNS解析失败: {str(e)}")
                 self.connection_state = "disconnected"
                 return False
                 
             try:
                 self.socket.connect(self.host, self.port)
             except (socket.error, OSError) as e:
-                self.logger.error(f"连接服务器失败: {str(e)}")
+                self.logger.error(f"连接失败: {str(e)}")
                 self.connection_state = "disconnected"
                 return False
                 
@@ -120,16 +120,8 @@ class ClientNetworkManager:
             
             # 等待连接建立，使用渐进式超时机制
             connection_timeout = time.time() + 5.0  # 5秒连接超时
-            progress_points = [1.0, 2.0, 3.0, 4.0]  # 在1秒、2秒、3秒和4秒时记录进度
-            next_progress = 0
             
             while time.time() < connection_timeout:
-                # 进度通知
-                elapsed = time.time() - self.setup_time
-                if next_progress < len(progress_points) and elapsed >= progress_points[next_progress]:
-                    self.logger.debug(f"连接进行中... {progress_points[next_progress]}秒")
-                    next_progress += 1
-                
                 self.socket.process()
                 if self.socket.status() == conf.NET_STATE_ESTABLISHED:
                     self._on_connection_established()
@@ -137,7 +129,7 @@ class ClientNetworkManager:
                     
                 time.sleep(0.01)  # 减少等待时间粒度
             
-            self.logger.error(f"连接服务器超时 (>{connection_timeout-self.setup_time}秒)")
+            self.logger.error(f"连接超时")
             
             self._close_socket()
             return False
@@ -167,7 +159,7 @@ class ClientNetworkManager:
     def try_reconnect(self):
         """尝试重新连接服务器，使用指数退避策略"""
         if self.reconnect_attempts >= self.max_reconnect_attempts:
-            self.logger.error(f"达到最大重连次数 ({self.max_reconnect_attempts})，停止重连")
+            self.logger.error(f"已达最大重连次数 ({self.max_reconnect_attempts})")
             return False
             
         current_time = time.time()
@@ -181,7 +173,7 @@ class ClientNetworkManager:
         self.last_reconnect_time = current_time
         self.reconnect_attempts += 1
         
-        self.logger.info(f"尝试重新连接服务器 (第 {self.reconnect_attempts} 次，等待了 {backoff_interval:.1f} 秒)")
+        self.logger.info(f"尝试重连 (第 {self.reconnect_attempts} 次)")
         
         # 确保旧连接已关闭
         if self.socket:
@@ -247,7 +239,7 @@ class ClientNetworkManager:
                 self.socket.send(data)
                 self.bytes_sent += len(data)
         except Exception as e:
-            self.logger.error(f"发送缓冲数据时出错: {str(e)}")
+            self.logger.error(f"发送数据出错: {str(e)}")
             # 如果发送失败，将数据重新放入缓冲区
             if 'data' in locals():
                 self.send_buffer.insert(0, data)
@@ -273,9 +265,8 @@ class ClientNetworkManager:
         if cur_time - self.last_heartbeat_time >= self.heartbeat_interval:
             self.last_heartbeat_time = cur_time
             self.heartbeat_count += 1
-            uptime = int(cur_time - self.setup_time)
             
-            # 发送心跳消息并测量延迟
+            # 记录发送时间用于延迟计算
             self.last_ping_time = cur_time
             return True
         return False
@@ -289,9 +280,10 @@ class ClientNetworkManager:
             if len(self.latency_samples) > 10:
                 self.latency_samples.pop(0)
             
-            # 计算平均延迟
-            avg_latency = sum(self.latency_samples) / len(self.latency_samples) if self.latency_samples else 0
-            self.logger.debug(f"网络延迟: {avg_latency:.2f}ms")
+            # 仅在调试级别记录平均延迟，减少日志量
+            if self.heartbeat_count % 10 == 0:  # 每10次心跳记录一次
+                avg_latency = sum(self.latency_samples) / len(self.latency_samples) if self.latency_samples else 0
+                self.logger.debug(f"网络延迟: {avg_latency:.2f}ms")
     
     def close(self):
         """关闭连接"""
@@ -370,7 +362,7 @@ class ClientEntity:
             self.test_details[self.test_state]["messages"].append(
                 f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {message}"
             )
-            self.logger.info(f"测试消息[{self.test_state.name}]: {message}")
+            self.logger.debug(f"测试[{self.test_state.name}]: {message}")
     
     def _mark_test_result(self, test_state, result, message=None):
         """标记测试结果并添加消息"""
@@ -384,8 +376,21 @@ class ClientEntity:
             # 记录测试结果
             result_str = f"测试[{test_state.name}]: {result.value}"
             duration = self.test_details[test_state]["end_time"] - self.test_details[test_state]["start_time"]
-            self.logger.info(f"{result_str} (耗时: {duration:.2f}秒)")
-            print(f"[测试结果] {result_str} (耗时: {duration:.2f}秒)")
+            
+            # 使用不同颜色标记不同测试结果
+            result_color = ""
+            if result == TestResult.SUCCESS:
+                result_color = ColorText.GREEN
+            elif result == TestResult.FAILURE:
+                result_color = ColorText.RED
+            elif result == TestResult.ERROR:
+                result_color = ColorText.RED
+            else:
+                result_color = ColorText.YELLOW
+                
+            self.logger.info(f"========== 测试结束 {test_state.name} ==========")
+            self.logger.info(f"结果: {result_str} (耗时: {duration:.2f}秒)")
+            print(f"\n[测试结果] {result_color}{result_str}{ColorText.RESET} (耗时: {duration:.2f}秒)")
             
     def _setup_timers(self):
         """设置定时器"""
@@ -408,7 +413,7 @@ class ClientEntity:
             current_time = time.time()
             if current_time - self.network_manager.last_connection_attempt >= self.network_manager.connection_retry_interval:
                 self.network_manager.last_connection_attempt = current_time
-                self.logger.info("测试: 尝试连接服务器...")
+                self.logger.info("尝试连接服务器...")
                 self.network_manager.connect()
             return
             
@@ -421,36 +426,29 @@ class ClientEntity:
         self.last_test_time = current_time
         
         # 根据不同的测试状态执行对应的测试步骤
-        if self.test_state == TestState.INIT:
-            self._do_init_test()
-        elif self.test_state == TestState.SAVE_WITHOUT_LOGIN:
-            self._do_save_without_login_test()
-        elif self.test_state == TestState.LOAD_WITHOUT_LOGIN:
-            self._do_load_without_login_test()
-        elif self.test_state == TestState.LOGIN_WRONG_CREDENTIALS:
-            self._do_login_wrong_credentials_test()
-        elif self.test_state == TestState.LOAD_AFTER_FAILED_LOGIN:
-            self._do_load_after_failed_login_test()
-        elif self.test_state == TestState.LOGIN_CORRECT_CREDENTIALS:
-            self._do_login_correct_credentials_test()
-        elif self.test_state == TestState.LOAD_WITHOUT_DATA:
-            self._do_load_without_data_test()
-        elif self.test_state == TestState.SAVE_DATA:
-            self._do_save_data_test()
-        elif self.test_state == TestState.RECONNECT:
-            self._do_reconnect_test()
-        elif self.test_state == TestState.CHECK_TOKEN_INVALID:
-            self._do_check_token_invalid_test()
-        elif self.test_state == TestState.LOAD_WITHOUT_LOGIN_2:
-            self._do_load_without_login_2_test()
-        elif self.test_state == TestState.LOGIN_AGAIN:
-            self._do_login_again_test()
-        elif self.test_state == TestState.LOAD_DATA:
-            self._do_load_data_test()
-        elif self.test_state == TestState.LOGOUT:
-            self._do_logout_test()
-        elif self.test_state == TestState.COMPLETE:
-            self._do_complete_test()
+        test_functions = {
+            TestState.INIT: self._do_init_test,
+            TestState.SAVE_WITHOUT_LOGIN: self._do_save_without_login_test,
+            TestState.LOAD_WITHOUT_LOGIN: self._do_load_without_login_test,
+            TestState.LOGIN_WRONG_CREDENTIALS: self._do_login_wrong_credentials_test,
+            TestState.LOAD_AFTER_FAILED_LOGIN: self._do_load_after_failed_login_test,
+            TestState.LOGIN_CORRECT_CREDENTIALS: self._do_login_correct_credentials_test,
+            TestState.LOAD_WITHOUT_DATA: self._do_load_without_data_test,
+            TestState.SAVE_DATA: self._do_save_data_test,
+            TestState.RECONNECT: self._do_reconnect_test,
+            TestState.CHECK_TOKEN_INVALID: self._do_check_token_invalid_test,
+            TestState.LOAD_WITHOUT_LOGIN_2: self._do_load_without_login_2_test,
+            TestState.LOGIN_AGAIN: self._do_login_again_test,
+            TestState.LOAD_DATA: self._do_load_data_test,
+            TestState.LOGOUT: self._do_logout_test,
+            TestState.COMPLETE: self._do_complete_test
+        }
+        
+        if self.test_state in test_functions:
+            # 在测试步骤开始前打印明显的分隔符
+            if self.test_state != TestState.INIT:
+                self.logger.info(f"========== 开始测试 {self.test_state.name} ==========")
+            test_functions[self.test_state]()
     
     def _do_init_test(self):
         """初始化测试步骤"""
@@ -538,9 +536,9 @@ class ClientEntity:
     
     def _do_save_data_test(self):
         """测试保存测试数据"""
-        self.logger.info("测试: 保存测试数据")
+        self.logger.info("测试: 保存数据")
         print("\n[测试] 7. 保存新的测试数据")
-        self._add_test_message(f"尝试保存测试数据: {json.dumps(self.test_sample_data, indent=2)}")
+        self._add_test_message("保存测试数据")
         
         self.user_data = self.test_sample_data
         self.caller.remote_call("userdata_save", json.dumps(self.test_sample_data))
@@ -632,14 +630,18 @@ class ClientEntity:
     
     def _do_complete_test(self):
         """完成所有测试"""
-        self.logger.info("所有测试完成")
+        self.logger.info("测试完成")
         print("\n\n===== 自动化测试完成 =====")
         current_time = time.time()
-        self._add_test_message("所有测试步骤已完成")
+        self._add_test_message("测试步骤已完成")
         
         # 打印测试结果摘要
-        print("\n\n===== 自动化测试完成 =====")
-        print("\n测试结果摘要:")
+        print("\n\n===== 测试结果摘要 =====")
+        
+        success_count = 0
+        failure_count = 0
+        error_count = 0
+        skipped_count = 0
         
         for state in TestState:
             if state != TestState.INIT and state != TestState.COMPLETE:
@@ -651,22 +653,21 @@ class ClientEntity:
                               ColorText.YELLOW)
                 print(f" - {state_name}: {result_color}{result_value}{ColorText.RESET}")
                 
-                # 记录到日志
-                self.logger.info(f"测试[{state_name}]: {result_value}")
-                
-                # 记录详细消息
-                if state in self.test_details:
-                    details = self.test_details[state]
-                    duration = details["end_time"] - details["start_time"] if details["end_time"] > 0 else 0
-                    self.logger.info(f"  耗时: {duration:.2f}秒, 消息: {len(details['messages'])}")
-                    
-                    for msg in details["messages"]:
-                        self.logger.info(f"    - {msg}")
+                # 统计结果
+                if result == TestResult.SUCCESS:
+                    success_count += 1
+                elif result == TestResult.FAILURE:
+                    failure_count += 1
+                elif result == TestResult.ERROR:
+                    error_count += 1
+                elif result == TestResult.SKIPPED:
+                    skipped_count += 1
         
         # 计算总体执行时间
         total_time = time.time() - self.start_time
-        print(f"\n总执行时间: {total_time:.2f}秒")
-        self.logger.info(f"测试总执行时间: {total_time:.2f}秒")
+        print(f"\n结果统计: 成功 {success_count}, 失败 {failure_count}, 错误 {error_count}, 跳过 {skipped_count}")
+        print(f"总执行时间: {total_time:.2f}秒")
+        self.logger.info(f"测试完成: 成功 {success_count}, 失败 {failure_count}, 错误 {error_count}, 跳过 {skipped_count}, 用时 {total_time:.2f}秒")
         
         print("\n程序将在5秒后退出...")
         self.running = False
@@ -694,8 +695,7 @@ class ClientEntity:
             
         # 处理接收到的数据
         if data_list:
-            for data in data_list:
-                self.pending_messages.append(data)
+            self.pending_messages.extend(data_list)
     
     def process_messages(self):
         """处理消息队列"""
@@ -732,17 +732,17 @@ class ClientEntity:
         """登录成功回调"""
         try:
             if not token:
-                self.logger.warning("收到空token")
+                self.logger.warning("认证成功但收到空token！这是服务端错误！")
                 self.authenticated = False
-                print("[登录] 异常: 服务器返回无效token")
-                self._add_test_message("登录异常: 服务器返回无效token")
+                print(f"{ColorText.RED}[登录] 异常: 服务器返回无效token{ColorText.RESET}")
+                self._add_test_message("严重错误: 服务端验证通过但返回空token")
                 
                 # 如果是正确凭据登录测试，标记为失败
                 if self.test_state == TestState.LOGIN_CORRECT_CREDENTIALS:
-                    self._mark_test_result(TestState.LOGIN_CORRECT_CREDENTIALS, TestResult.FAILURE, "登录失败: 无效token")
+                    self._mark_test_result(TestState.LOGIN_CORRECT_CREDENTIALS, TestResult.FAILURE, "服务端错误: 认证成功但返回空token")
                 # 如果是重新登录测试，标记为失败
                 elif self.test_state == TestState.LOGIN_AGAIN:
-                    self._mark_test_result(TestState.LOGIN_AGAIN, TestResult.FAILURE, "重新登录失败: 无效token")
+                    self._mark_test_result(TestState.LOGIN_AGAIN, TestResult.FAILURE, "服务端错误: 认证成功但返回空token")
                     
                 return
                 
@@ -753,17 +753,17 @@ class ClientEntity:
             
             # 不在日志中显示完整的token，只显示部分
             masked_token = token[:5] + "..." + token[-5:] if len(token) > 10 else "***"
-            self.logger.info(f"登录成功，获取token: {masked_token}")
+            self.logger.info(f"认证成功，获取有效token: {masked_token}")
             
-            print(f"[登录] 成功! 用户: {self.username}, Token: {masked_token}")
-            self._add_test_message(f"登录成功，用户: {self.username}，Token: {masked_token}")
+            print(f"{ColorText.GREEN}[登录] 成功! 用户: {self.username}{ColorText.RESET}")
+            self._add_test_message(f"认证成功，用户: {self.username}")
             
             # 如果是正确凭据登录测试，标记为成功
             if self.test_state == TestState.LOGIN_CORRECT_CREDENTIALS:
-                self._mark_test_result(TestState.LOGIN_CORRECT_CREDENTIALS, TestResult.SUCCESS, "使用正确凭据登录成功")
+                self._mark_test_result(TestState.LOGIN_CORRECT_CREDENTIALS, TestResult.SUCCESS, "使用正确凭据认证成功")
             # 如果是重新登录测试，标记为成功
             elif self.test_state == TestState.LOGIN_AGAIN:
-                self._mark_test_result(TestState.LOGIN_AGAIN, TestResult.SUCCESS, "重连后重新登录成功")
+                self._mark_test_result(TestState.LOGIN_AGAIN, TestResult.SUCCESS, "重连后重新认证成功")
                 
         except Exception as e:
             self.logger.error(f"处理登录成功回调时出错: {str(e)}")
@@ -832,9 +832,11 @@ class ClientEntity:
         """接收用户数据更新"""
         try:
             self.user_data = json.loads(data_json)
-            self.logger.info("已接收用户数据")
-            print(f"[数据] 已接收用户数据: {data_json[:50]}..." if len(data_json) > 50 else data_json)
-            self._add_test_message(f"成功接收用户数据: {data_json}")
+            self.logger.info("接收用户数据")
+            # 截断显示数据，避免过长输出
+            data_preview = data_json[:50] + ("..." if len(data_json) > 50 else "")
+            print(f"[数据] 已接收用户数据: {data_preview}")
+            self._add_test_message(f"接收用户数据成功")
             
             # 如果是加载用户数据测试，标记为成功
             if self.test_state == TestState.LOAD_WITHOUT_DATA:
@@ -852,21 +854,20 @@ class ClientEntity:
                             break
                     
                     if is_matching:
-                        self._mark_test_result(TestState.LOAD_DATA, TestResult.SUCCESS, "成功加载之前保存的数据，数据匹配")
+                        self._mark_test_result(TestState.LOAD_DATA, TestResult.SUCCESS, "加载数据与保存的一致")
                     else:
-                        self._mark_test_result(TestState.LOAD_DATA, TestResult.FAILURE, "加载的数据与之前保存的不匹配")
+                        self._mark_test_result(TestState.LOAD_DATA, TestResult.FAILURE, "加载的数据不匹配")
                 except:
-                    self._mark_test_result(TestState.LOAD_DATA, TestResult.ERROR, "验证加载数据时出错")
+                    self._mark_test_result(TestState.LOAD_DATA, TestResult.ERROR, "验证数据时出错")
         except Exception as e:
-            self.logger.error(f"解析用户数据时出错: {str(e)}")
-            print(f"[数据] 加载用户数据时出错: {str(e)}")
-            self._add_test_message(f"解析用户数据出错: {str(e)}")
+            self.logger.error(f"解析数据失败: {str(e)}")
+            print(f"[数据] 加载失败: {str(e)}")
             
             # 标记测试失败
             if self.test_state == TestState.LOAD_WITHOUT_DATA:
-                self._mark_test_result(TestState.LOAD_WITHOUT_DATA, TestResult.ERROR, f"解析用户数据出错: {str(e)}")
+                self._mark_test_result(TestState.LOAD_WITHOUT_DATA, TestResult.ERROR, "解析数据错误")
             elif self.test_state == TestState.LOAD_DATA:
-                self._mark_test_result(TestState.LOAD_DATA, TestResult.ERROR, f"解析用户数据出错: {str(e)}")
+                self._mark_test_result(TestState.LOAD_DATA, TestResult.ERROR, "解析数据错误")
     
     @EXPOSED
     def save_success(self):
