@@ -28,6 +28,9 @@ class GameServerEntity:
     """游戏服务器实体类，处理单个客户端连接和逻辑"""
     
     def __init__(self, netstream, server):
+        # 初始化EXPOSED_FUNC字典用于RPC暴露函数
+        self.EXPOSED_FUNC = {}
+        
         self.netstream = netstream
         self.caller = RpcProxy(self, netstream)
         self.server = weakref.proxy(server)  # 使用弱引用避免循环引用
@@ -95,7 +98,7 @@ class GameServerEntity:
             
             # 若已认证，使token失效
             if self.authenticated and self.token:
-                db_manager.invalidate_token(self.token)
+                self.server.invalidate_token(self.token)
                 self.logger.debug(f"使用户 {self.username} 的令牌失效")
                 
             if hasattr(self, 'caller') and self.caller:
@@ -117,8 +120,8 @@ class GameServerEntity:
             self.logger.warning(f"客户端 {self.id} 请求操作但无token")
             return False
             
-        # 通过数据库管理器验证token，同时验证client_id
-        username = db_manager.validate_token(self.token, self.id)
+        # 通过服务器验证token，同时验证client_id
+        username = self.server.validate_token(self.token, self.id)
         # 确保token对应的用户名与当前认证的用户名一致
         is_valid = username is not None and username == self.username
         
@@ -181,13 +184,20 @@ class GameServerEntity:
             # 增加登录尝试计数
             self.login_attempts += 1
             
-            # 认证过程 - 确保只有认证成功才会获得token，并传入client_id
-            # 使用self.id作为client标识，便于追踪token与客户端的关联
-            token = db_manager.authenticate(username, password, self.id)
+            # 使用数据库验证用户名和密码
+            import hashlib
+            hashed_pwd = hashlib.sha256(password.encode()).hexdigest()
+            auth_success = db_manager.verify_user_credentials(username, hashed_pwd)
             
-            if token:
-                # 处理认证成功
-                self._handle_successful_login(username, token)
+            if auth_success:
+                # 认证成功，生成token
+                token = self.server._generate_token(username, self.id)
+                if token:
+                    # 处理认证成功
+                    self._handle_successful_login(username, token)
+                else:
+                    self.logger.error(f"客户端 {self.id} 认证成功但token生成失败")
+                    self._send_client_response("login_failed", "内部处理错误")
             else:
                 # 认证失败
                 self.logger.warning(f"客户端 {self.id} 认证失败: {username}")
@@ -205,7 +215,7 @@ class GameServerEntity:
             if existing_client and existing_client != self:
                 self._handle_existing_login(existing_client)
             
-           # 登录成功
+            # 登录成功
             self.authenticated = True
             self.username = username
             self.token = token
@@ -319,7 +329,7 @@ class GameServerEntity:
         
         # 使token失效
         if self.authenticated and self.token:
-            db_manager.invalidate_token(self.token)
+            self.server.invalidate_token(self.token)
             
         self._send_client_response("exit_confirmed")
         # 将客户端标记为待移除
@@ -339,6 +349,10 @@ class MyGameServer(SimpleServer):
         self.clients = {}  # 存储客户端实体 {client_id: entity}
         self.clients_by_username = {}  # 按用户名索引客户端 {username: entity}
         self.clients_to_remove = set()  # 存储待移除的客户端ID
+        
+        # Token管理
+        self.active_tokens = {}  # {token: (username, expiry_time, client_id)}
+        self.token_validity = 7200  # token有效期(秒)
         
         # 性能监控
         self.tick_count = 0
@@ -545,6 +559,103 @@ class MyGameServer(SimpleServer):
             self._log_error(f"删除客户端 {client_id} 时出错", e)
             if client_id in self.clients:
                 del self.clients[client_id]
+    
+    def _generate_token(self, username, client_id=None):
+        """为用户生成唯一的令牌
+        
+        Args:
+            username (str): 用户名
+            client_id (int, optional): 客户端ID，用于区分不同的连接
+            
+        Returns:
+            str: 生成的token字符串，生成失败则返回None
+        """
+        import hashlib
+        import random
+        import os
+        
+        try:
+            # 参数验证
+            if not username or not isinstance(username, str):
+                self.logger.error("生成令牌失败: 无效的用户名")
+                return None
+            
+            # 增强熵源，提高安全性
+            random_part = str(random.randint(100000, 999999))
+            timestamp = str(time.time())
+            entropy = os.urandom(16).hex()  # 增加熵值大小
+            client_part = str(client_id if client_id is not None else random.randint(0, 1000000))
+            token_base = f"{username}:{random_part}:{timestamp}:{entropy}:{client_part}"
+            
+            # 生成令牌
+            token = hashlib.sha256(token_base.encode()).hexdigest()
+            expiry_time = time.time() + self.token_validity
+            
+            # 使旧令牌失效 (如果用户已登录在其他地方)
+            self._invalidate_tokens_for_user(username)
+            
+            # 存储令牌在内存中
+            self.active_tokens[token] = (username, expiry_time, client_id)
+            self.logger.debug(f"生成新token: 用户={username}, 客户端ID={client_id}, 过期时间={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(expiry_time))}")
+            
+            return token
+        except Exception as e:
+            self.logger.error(f"生成令牌时发生错误: {str(e)}")
+            return None
+    
+    def _invalidate_tokens_for_user(self, username):
+        """使指定用户的所有令牌失效"""
+        tokens_to_remove = []
+        for token, (token_username, _, _) in self.active_tokens.items():
+            if token_username == username:
+                tokens_to_remove.append(token)
+                
+        for token in tokens_to_remove:
+            del self.active_tokens[token]
+            
+        if tokens_to_remove:
+            self.logger.info(f"已使用户 {username} 的 {len(tokens_to_remove)} 个旧令牌失效")
+    
+    def validate_token(self, token, client_id=None):
+        """验证令牌的有效性
+        
+        Args:
+            token (str): 要验证的token
+            client_id (int, optional): 客户端ID，如果提供则进行额外验证
+            
+        Returns:
+            str: 如果token有效，返回对应的用户名；否则返回None
+        """
+        if not token or not isinstance(token, str):
+            self.logger.warning("验证令牌失败: 无效的令牌格式")
+            return None
+            
+        if token not in self.active_tokens:
+            self.logger.debug("验证令牌失败: 令牌不存在")
+            return None
+            
+        username, expiry_time, stored_client_id = self.active_tokens[token]
+        
+        # 检查令牌是否过期
+        if time.time() >expiry_time:
+            # 令牌已过期，从活动令牌中移除
+            self.logger.info(f"用户 {username} 的令牌已过期")
+            del self.active_tokens[token]
+            return None
+        
+        # 如果提供了client_id，确保匹配
+        if client_id is not None and stored_client_id is not None and client_id != stored_client_id:
+            self.logger.warning(f"令牌验证失败: 客户端ID不匹配 (预期: {stored_client_id}, 实际: {client_id})")
+            return None
+            
+        return username
+    
+    def invalidate_token(self, token):
+        """使令牌失效"""
+        if token in self.active_tokens:
+            del self.active_tokens[token]
+            return True
+        return False
     
     def on_low_frequency_tick(self):
         """100ms低频定时器回调 - 处理统计和清理任务"""

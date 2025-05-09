@@ -93,3 +93,8 @@ C:\Users\wydx\Documents\Unreal Projects\Server\sample_server.py
 优化下列文件代码逻辑：
 C:\Users\wydx\Documents\Unreal Projects\Server\sample_server.py
 在不影响逻辑的情况下，进行合理的精简
+
+C:\Users\wydx\Documents\Unreal Projects\Server\sample_server.py
+C:\Users\wydx\Documents\Unreal Projects\Server\server\common\db_manager.py
+对于服务端的_verify_token、_verify_auth、_verify_auth_with_token等函数，以及db_manager的invalidate_token、validate_token、_invalidate_tokens_for_user等函数，本质上是将服务端的token放在了数据库部分进行处理，这和我的预期不符，我期望token仅仅是每次服务端和客户端通信连接建立时，临时使用的一次性身份凭证，不需要和数据库进行交互处理，在服务端中设置一个数据结构对其进行管理即可；
+所以，移除数据库中对token的处理和验证部分代码，同时将相关token处理放在服务端完成

@@ -15,9 +15,6 @@ class DatabaseManager:
     def __init__(self, db_path='server_data.db'):
         self.db_path = db_path
         self.logger = logger_instance.get_logger('DatabaseManager')
-        # 内存中存储token的字典，不会持久化到数据库
-        self.active_tokens = {}  # {token: (username, expiry_time, client_id)}
-        self.token_validity = 7200  # token有效期(秒)
         self._initialize_db()
         
     def _initialize_db(self):
@@ -108,151 +105,42 @@ class DatabaseManager:
         """简单的密码哈希"""
         return hashlib.sha256(password.encode()).hexdigest()
     
-    def _generate_token(self, username, client_id=None):
-        """为用户生成唯一的令牌
+    def verify_user_credentials(self, username, hashed_password):
+        """验证用户凭据
         
         Args:
             username (str): 用户名
-            client_id (int, optional): 客户端ID，用于区分不同的连接
+            hashed_password (str): 哈希后的密码
             
         Returns:
-            str: 生成的token字符串，生成失败则返回None
+            bool: 验证成功返回True，否则返回False
         """
-        try:
-            # 参数验证
-            if not username or not isinstance(username, str):
-                self.logger.error("生成令牌失败: 无效的用户名")
-                return None
-            
-            # 增强熵源，提高安全性
-            random_part = str(random.randint(100000, 999999))
-            timestamp = str(time.time())
-            entropy = os.urandom(16).hex()  # 增加熵值大小
-            client_part = str(client_id if client_id is not None else random.randint(0, 1000000))
-            token_base = f"{username}:{random_part}:{timestamp}:{entropy}:{client_part}"
-            
-            # 生成令牌
-            token = hashlib.sha256(token_base.encode()).hexdigest()
-            expiry_time = time.time() + self.token_validity
-            
-            # 使旧令牌失效 (如果用户已登录在其他地方)
-            self._invalidate_tokens_for_user(username)
-            
-            # 存储令牌在内存中（不写入数据库）
-            self.active_tokens[token] = (username, expiry_time, client_id)
-            self.logger.debug(f"生成新token: 用户={username}, 客户端ID={client_id}, 过期时间={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(expiry_time))}")
-            
-            return token
-        except Exception as e:
-            self.logger.error(f"生成令牌时发生错误: {str(e)}")
-            return None
-            
-    def _invalidate_tokens_for_user(self, username):
-        """使指定用户的所有令牌失效"""
-        tokens_to_remove = []
-        for token, (token_username, _) in self.active_tokens.items():
-            if token_username == username:
-                tokens_to_remove.append(token)
-                
-        for token in tokens_to_remove:
-            del self.active_tokens[token]
-            
-        if tokens_to_remove:
-            self.logger.info(f"已使用户 {username} 的 {len(tokens_to_remove)} 个旧令牌失效")
-    
-    def authenticate(self, username, password, client_id=None):
-        """验证用户身份并生成令牌
-        
-        Args:
-            username (str): 用户名
-            password (str): 密码
-            client_id (int, optional): 客户端ID，用于关联生成的token
-            
-        Returns:
-            str: 成功则返回生成的token，失败返回None
-        """
-        self.logger.info(f"验证用户身份: {username}")
-        
-        # 参数验证
-        if not username or not isinstance(username, str) or not password or not isinstance(password, str):
-            self.logger.warning("认证失败: 无效的用户名或密码参数")
-            return None
+        self.logger.info(f"验证用户凭据: {username}")
         
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                hashed_pwd = self._hash_password(password)
                 
                 # 查询用户
                 cursor.execute(
                     "SELECT * FROM users WHERE username = ? AND password = ?",
-                    (username, hashed_pwd)
+                    (username, hashed_password)
                 )
                 
                 user = cursor.fetchone()
                 
                 if user:
-                    # 认证成功才生成令牌
-                    self.logger.info(f"用户 {username} 认证成功")
-                    token = self._generate_token(username, client_id)
-                    
-                    if not token:  # 确保token生成成功
-                        self.logger.error(f"用户 {username} 认证成功但token生成失败")
-                        return None
-                        
-                    self.logger.info(f"用户 {username} 令牌生成成功" + (f", 关联客户端ID: {client_id}" if client_id else ""))
-                    return token
+                    self.logger.info(f"用户 {username} 凭据验证成功")
+                    return True
                 else:
-                    self.logger.warning(f"用户 {username} 认证失败: 用户名或密码错误")
-                    return None
+                    self.logger.warning(f"用户 {username} 凭据验证失败")
+                    return False
                     
         except Exception as e:
-            self.logger.error(f"验证用户时出错: {str(e)}")
-            return None
+            self.logger.error(f"验证用户凭据时出错: {str(e)}")
+            return False
     
-    def validate_token(self, token, client_id=None):
-        """验证令牌的有效性
-        
-        Args:
-            token (str): 要验证的token
-            client_id (int, optional): 客户端ID，如果提供则进行额外验证
-            
-        Returns:
-            str: 如果token有效，返回对应的用户名；否则返回None
-        """
-        if not token or not isinstance(token, str):
-            self.logger.warning("验证令牌失败: 无效的令牌格式")
-            return None
-            
-        if token not in self.active_tokens:
-            self.logger.debug("验证令牌失败: 令牌不存在")
-            return None
-            
-        username, expiry_time, stored_client_id = self.active_tokens[token]
-        
-        # 检查令牌是否过期
-        if time.time() > expiry_time:
-            # 令牌已过期，从活动令牌中移除
-            self.logger.info(f"用户 {username} 的令牌已过期")
-            del self.active_tokens[token]
-            return None
-        
-        # 如果提供了client_id，确保匹配
-        if client_id is not None and stored_client_id is not None and client_id != stored_client_id:
-            self.logger.warning(f"令牌验证失败: 客户端ID不匹配 (预期: {stored_client_id}, 实际: {client_id})")
-            return None
-            
-        # 延长令牌有效期（可选，取决于你的安全策略）
-        # self.active_tokens[token] = (username, time.time() + self.token_validity, stored_client_id)
-        
-        return username
-    
-    def invalidate_token(self, token):
-        """使令牌失效"""
-        if token in self.active_tokens:
-            del self.active_tokens[token]
-            return True
-        return False
+    # 令牌管理已移至 MyGameServer 类，此处移除重复的令牌管理方法
     
     def save_user_data(self, username, data_json):
         """保存用户数据"""
@@ -328,16 +216,6 @@ class DatabaseManager:
     def cleanup(self):
         """清理资源，在服务器关闭时调用"""
         self.logger.info("清理数据库管理器资源")
-        
-        # 记录当前活动token数量
-        token_count = len(self.active_tokens)
-        if token_count > 0:
-            self.logger.info(f"清除 {token_count} 个活动token")
-            
-        # 释放所有活动的令牌（仅内存中的操作）
-        self.active_tokens.clear()
-        
-        # 如果有连接池或其他需要释放的资源，可以在这里处理
 
 # 单例模式
 db_manager = DatabaseManager()
