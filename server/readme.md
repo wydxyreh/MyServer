@@ -86,3 +86,10 @@ C:\Users\wydx\Documents\Unreal Projects\Server\sample_client.py
 def test主要依次测试：save失败（未登录），load失败（未登录），login账密登录失败（账密错误）、load失败（未登录）、login账密登录成功（账密正确），load失败（该账密下没有对应的json数据），save成功（将样例json存储在对应账密下），reconnect，login（token登录无效），load失败（未登录），login账密登录成功（账密正确），load成功（成功从该账密下读取数据），logout（退出登录，主动使token失效，但仍然保持同一连接）
 
 修改C:\Users\wydx\Documents\Unreal Projects\Server\sample_client.py代码，减少冗余日志输出
+
+C:\Users\wydx\Documents\Unreal Projects\Server\sample_server.py
+移除该文件中和测试相关的部分代码，只保留正常的功能代码，只需要给出修改的部分即可
+
+优化下列文件代码逻辑：
+C:\Users\wydx\Documents\Unreal Projects\Server\sample_server.py
+在不影响逻辑的情况下，进行合理的精简

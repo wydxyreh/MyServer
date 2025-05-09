@@ -13,54 +13,15 @@ from enum import Enum, auto
 
 # 添加当前目录到Python路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
- 
+
 from server.common import conf
 from server.network.netStream import NetStream, RpcProxy
 from server.common.logger import logger_instance
 from server.common.timer import TimerManager
 
-# 定义ANSI转义序列用于控制台颜色
-class ColorText:
-    RESET = "\033[0m"
-    RED = "\033[91m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    BLUE = "\033[94m"
-    CYAN = "\033[96m"
-
 def EXPOSED(func):
     func.__exposed__ = True
     return func
-
-# 设置日志记录器而不是使用print
-logger = logger_instance.get_logger('ClientTest')
-
-# 测试状态枚举
-class TestState(Enum):
-    INIT = auto()
-    SAVE_WITHOUT_LOGIN = auto()
-    LOAD_WITHOUT_LOGIN = auto()
-    LOGIN_WRONG_CREDENTIALS = auto()
-    LOAD_AFTER_FAILED_LOGIN = auto()
-    LOGIN_CORRECT_CREDENTIALS = auto()
-    LOAD_WITHOUT_DATA = auto()
-    SAVE_DATA = auto()
-    RECONNECT = auto()
-    CHECK_TOKEN_INVALID = auto()
-    LOAD_WITHOUT_LOGIN_2 = auto()
-    LOGIN_AGAIN = auto()
-    LOAD_DATA = auto()
-    LOGOUT = auto()
-    COMPLETE = auto()
-
-# 测试结果状态枚举
-class TestResult(Enum):
-    PENDING = "pending"   # 等待执行
-    RUNNING = "running"   # 正在执行
-    SUCCESS = "success"   # 测试成功
-    FAILURE = "failure"   # 测试失败
-    SKIPPED = "skipped"   # 测试跳过
-    ERROR = "error"       # 测试错误
 
 class ClientNetworkManager:
     """客户端网络管理器，整合了NetworkSocket的心跳机制和NetStream的RPC功能"""
@@ -336,128 +297,9 @@ class ClientEntity:
         # 用户数据
         self.user_data = {}
         
-        # 自动测试相关
-        self.test_state = TestState.INIT
-        self.last_test_time = time.time()
-        self.test_wait_time = 0.05  # 进一步减少测试间隔
-        self.test_results = {}  # 测试结果记录
-        self.test_details = {}  # 测试详细信息
-        self.start_time = time.time()  # 测试开始时间
-        self.waiting_for_callback = False  # 是否正在等待回调完成
-        self.current_test_logged = False  # 是否已记录当前测试的开始信息
-        self.next_test_state = None  # 预定的下一个测试状态
-        
-        # 初始化测试结果
-        for state in TestState:
-            if state != TestState.INIT:  # 包含COMPLETE状态
-                self.test_results[state] = TestResult.PENDING
-                self.test_details[state] = {"start_time": 0, "end_time": 0, "messages": []}
-        
-        self.test_sample_data = {
-            "name": self.DEFAULT_USERNAME,
-            "bullet": 50,
-            "exp": 100,
-            "test_items": ["sword", "shield"],
-            "settings": {"difficulty": "hard", "sound": True}
-        }
-        
         # 设置定时器
         self._setup_timers()
         
-        # 打印欢迎信息
-        self._print_welcome_message()
-        
-    def _print_welcome_message(self):
-        """打印测试客户端欢迎信息"""
-        welcome_msg = "\n" + "="*60 + "\n" + "服务器通信自动测试客户端".center(58) + "\n" + \
-                      f"开始时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}" + "\n" + "="*60 + "\n"
-        print(welcome_msg)
-        self.logger.info("测试客户端启动")
-        self.logger.info(welcome_msg)
-    
-    def _add_test_message(self, message):
-        """添加测试消息到当前测试状态的详细信息中"""
-        if self.test_state in self.test_details:
-            self.test_details[self.test_state]["messages"].append(
-                f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {message}"
-            )
-            self.logger.debug(f"测试[{self.test_state.name}]: {message}")
-    
-    def _mark_test_result(self, test_state, result, message=None):
-        """标记测试结果并添加消息"""
-        if test_state in self.test_results:
-            # 避免重复标记结果
-            if self.test_results[test_state] != TestResult.RUNNING and result == TestResult.RUNNING:
-                return
-                
-            if self.test_results[test_state] not in [TestResult.PENDING, TestResult.RUNNING]:
-                return
-                
-            self.test_results[test_state] = result
-            self.test_details[test_state]["end_time"] = time.time()
-            
-            if message:
-                # 只添加消息，不重复记录日志
-                self._add_test_message(message)
-                
-            # 记录测试结果
-            result_str = f"测试[{test_state.name}]: {result.value}"
-            duration = self.test_details[test_state]["end_time"] - self.test_details[test_state]["start_time"]
-            
-            # 只在测试结束时记录结果(SUCCESS, FAILURE, ERROR, SKIPPED)
-            if result != TestResult.RUNNING:
-                # 使用不同颜色标记不同测试结果
-                result_color = ""
-                if result == TestResult.SUCCESS:
-                    result_color = ColorText.GREEN
-                elif result == TestResult.FAILURE:
-                    result_color = ColorText.RED
-                elif result == TestResult.ERROR:
-                    result_color = ColorText.RED
-                else:
-                    result_color = ColorText.YELLOW
-                    
-                self.logger.info(f"========== 测试结束 {test_state.name} ==========")
-                self.logger.info(f"结果: {result_str} (耗时: {duration:.2f}秒)")
-                print(f"[测试结果] {result_color}{result_str}{ColorText.RESET} (耗时: {duration:.2f}秒)")
-                
-                # 重置等待标志
-                self.waiting_for_callback = False
-                self.logger.info(f"========== 测试结束 {test_state.name} ==========")
-                self.logger.info(f"结果: {result_str} (耗时: {duration:.2f}秒)")
-                print(f"[测试结果] {result_color}{result_str}{ColorText.RESET} (耗时: {duration:.2f}秒)")
-                
-                # 重置等待标志
-                self.waiting_for_callback = False
-                
-                # 延迟设置下一个测试状态，确保结果记录完成
-                if test_state == TestState.SAVE_WITHOUT_LOGIN:
-                    self.next_test_state = TestState.LOAD_WITHOUT_LOGIN
-                elif test_state == TestState.LOAD_WITHOUT_LOGIN:
-                    self.next_test_state = TestState.LOGIN_WRONG_CREDENTIALS
-                elif test_state == TestState.LOGIN_WRONG_CREDENTIALS:
-                    self.next_test_state = TestState.LOAD_AFTER_FAILED_LOGIN
-                elif test_state == TestState.LOAD_AFTER_FAILED_LOGIN:
-                    self.next_test_state = TestState.LOGIN_CORRECT_CREDENTIALS
-                elif test_state == TestState.LOGIN_CORRECT_CREDENTIALS:
-                    self.next_test_state = TestState.LOAD_WITHOUT_DATA
-                elif test_state == TestState.LOAD_WITHOUT_DATA:
-                    self.next_test_state = TestState.SAVE_DATA
-                elif test_state == TestState.SAVE_DATA:
-                    self.next_test_state = TestState.RECONNECT
-                elif test_state == TestState.RECONNECT:
-                    self.next_test_state = TestState.CHECK_TOKEN_INVALID
-                elif test_state == TestState.CHECK_TOKEN_INVALID:
-                    self.next_test_state = TestState.LOAD_WITHOUT_LOGIN_2
-                elif test_state == TestState.LOAD_WITHOUT_LOGIN_2:
-                    self.next_test_state = TestState.LOGIN_AGAIN
-                elif test_state == TestState.LOGIN_AGAIN:
-                    self.next_test_state = TestState.LOAD_DATA
-                elif test_state == TestState.LOAD_DATA:
-                    self.next_test_state = TestState.LOGOUT
-                elif test_state == TestState.LOGOUT:
-                    self.next_test_state = TestState.COMPLETE
-            
     def _setup_timers(self):
         """设置定时器"""
         # 10ms定时器 - 处理网络
@@ -465,9 +307,6 @@ class ClientEntity:
         
         # 100ms定时器 - 处理消息
         TimerManager.addRepeatTimer(0.1, self.process_messages)
-        
-        # 测试定时器 - 执行测试流程
-        TimerManager.addRepeatTimer(0.5, self.run_test_step)
     
     def _on_reconnect(self, new_socket):
         """处理重连事件，重置RPC代理"""
@@ -488,365 +327,6 @@ class ClientEntity:
         # 重置认证状态
         self.authenticated = False
         self.token = None
-    
-    def run_test_step(self):
-        """执行测试步骤"""
-        if not self.running:
-            return
-            
-        # 确保网络已连接
-        if not self.network_manager.connected:
-            current_time = time.time()
-            if current_time - self.network_manager.last_connection_attempt >= self.network_manager.connection_retry_interval:
-                self.network_manager.last_connection_attempt = current_time
-                self.logger.info("尝试连接服务器...")
-                self.network_manager.connect()
-            return
-        
-        # 如果正在等待回调完成，则跳过测试步骤
-        if self.waiting_for_callback:
-            return
-            
-        # 处理状态转换 - 只在当前测试完成且没有等待回调时才转换状态
-        if self.next_test_state is not None:
-            old_state = self.test_state
-            self.test_state = self.next_test_state
-            self.next_test_state = None
-            self.current_test_logged = False
-            self.test_details[self.test_state]["start_time"] = time.time()
-            self.test_results[self.test_state] = TestResult.RUNNING
-        
-            # 避免重复记录日志
-            if old_state != self.test_state:
-                self.logger.info(f"========== 开始测试 {self.test_state.name} ==========")
-            self.current_test_logged = True
-            
-        # 如果正在等待回调完成，则跳过测试步骤
-        if self.waiting_for_callback:
-            return
-        
-        # 等待一定时间间隔再执行下一步测试
-        current_time = time.time()
-        if current_time - self.last_test_time < self.test_wait_time:
-            return
-            
-        # 记录测试开始信息(如果尚未记录)
-        if not self.current_test_logged and self.test_state != TestState.INIT:
-            self.logger.info(f"========== 开始测试 {self.test_state.name} ==========")
-            self.current_test_logged = True
-            
-        # 执行当前测试状态对应的步骤
-        self.last_test_time = current_time
-        
-        # 根据不同的测试状态执行对应的测试步骤
-        test_functions = {
-            TestState.INIT: self._do_init_test,
-            TestState.SAVE_WITHOUT_LOGIN: self._do_save_without_login_test,
-            TestState.LOAD_WITHOUT_LOGIN: self._do_load_without_login_test,
-            TestState.LOGIN_WRONG_CREDENTIALS: self._do_login_wrong_credentials_test,
-            TestState.LOAD_AFTER_FAILED_LOGIN: self._do_load_after_failed_login_test,
-            TestState.LOGIN_CORRECT_CREDENTIALS: self._do_login_correct_credentials_test,
-            TestState.LOAD_WITHOUT_DATA: self._do_load_without_data_test,
-            TestState.SAVE_DATA: self._do_save_data_test,
-            TestState.RECONNECT: self._do_reconnect_test,
-            TestState.CHECK_TOKEN_INVALID: self._do_check_token_invalid_test,
-            TestState.LOAD_WITHOUT_LOGIN_2: self._do_load_without_login_2_test,
-            TestState.LOGIN_AGAIN: self._do_login_again_test,
-            TestState.LOAD_DATA: self._do_load_data_test,
-            TestState.LOGOUT: self._do_logout_test,
-            TestState.COMPLETE: self._do_complete_test
-        }
-        
-        if self.test_state in test_functions:
-            # 在测试步骤开始前打印明显的分隔符
-            if self.test_state != TestState.INIT:
-                self.logger.info(f"========== 开始测试 {self.test_state.name} ==========")
-            test_functions[self.test_state]()
-    
-    def _do_init_test(self):
-        """初始化测试步骤"""
-        self.logger.info("测试初始化完成，开始测试流程")
-        print("\n\n===== 开始自动化测试流程 =====")
-        self.test_state = TestState.SAVE_WITHOUT_LOGIN
-        self.test_details[self.test_state]["start_time"] = time.time()
-        self.test_results[self.test_state] = TestResult.RUNNING
-    
-    def _do_save_without_login_test(self):
-        """测试未登录状态下保存数据"""
-        self.logger.info("测试: 未登录状态下保存数据")
-        print("\n[测试] 1. 未登录状态下保存数据(预期失败)")
-        self._add_test_message("发送保存数据请求，预期服务器会拒绝未登录状态的请求")
-        
-        # 设置等待回调标志
-        self.waiting_for_callback = True
-        
-        # 发送请求
-        self.caller.remote_call("userdata_save", json.dumps(self.test_sample_data))
-    
-    def _do_load_without_login_test(self):
-        """测试未登录状态下加载数据"""
-        self.logger.info("测试: 未登录状态下加载数据")
-        print("\n[测试] 2. 未登录状态下加载数据(预期失败)")
-        self._add_test_message("发送加载数据请求，预期服务器会拒绝未登录状态的请求")
-        
-        # 设置等待回调标志
-        self.waiting_for_callback = True
-        
-        self.caller.remote_call("userdata_load")
-
-        self.test_state = TestState.LOGIN_WRONG_CREDENTIALS
-        self.test_details[self.test_state]["start_time"] = time.time()
-        self.test_results[self.test_state] = TestResult.RUNNING
-    
-    def _do_login_wrong_credentials_test(self):
-        """测试使用错误凭据登录"""
-        self.logger.info("测试: 错误凭据登录")
-        print("\n[测试] 3. 使用错误的账号密码登录(预期失败)")
-        self._add_test_message("尝试使用错误的账号密码登录，预期失败")
-        
-        self.username = "wrong_user"
-        self.password = "wrong_pass"
-        self.caller.remote_call("client_login", self.username, self.password)
-        
-        # 标记当前测试为已完成，等待login_failed回调来设置结果
-        self._mark_test_result(self.test_state, TestResult.SUCCESS, "使用错误凭据登录，预期失败，测试通过")
-        
-        self.test_state = TestState.LOAD_AFTER_FAILED_LOGIN
-        self.test_details[self.test_state]["start_time"] = time.time()
-        self.test_results[self.test_state] = TestResult.RUNNING
-    
-    def _do_load_after_failed_login_test(self):
-        """测试登录失败后加载数据"""
-        self.logger.info("测试: 登录失败后加载数据")
-        print("[测试] 4. 登录失败后加载数据(预期失败)")
-        self._add_test_message("登录失败后尝试加载数据，预期失败")
-        
-        self.caller.remote_call("userdata_load")
-        
-        # 标记当前测试为已完成，等待auth_error回调来设置结果
-        self._mark_test_result(self.test_state, TestResult.SUCCESS, "登录失败后尝试加载数据，服务器正确拒绝")
-        
-        self.test_state = TestState.LOGIN_CORRECT_CREDENTIALS
-        self.test_details[self.test_state]["start_time"] = time.time()
-        self.test_results[self.test_state] = TestResult.RUNNING
-    
-    def _do_login_correct_credentials_test(self):
-        """测试使用正确凭据登录"""
-        self.logger.info("测试: 正确凭据登录")
-        print("[测试] 5. 使用正确的账号密码登录(预期成功)")
-        self._add_test_message("尝试使用正确的账号密码登录，预期成功")
-        
-        self.username = self.DEFAULT_USERNAME
-        self.password = self.DEFAULT_PASSWORD
-        self.caller.remote_call("client_login", self.username, self.password)
-        
-        # 立即标记当前测试为运行中
-        # login_success或login_failed回调将更新这个状态
-        self._mark_test_result(self.test_state, TestResult.RUNNING, "登录请求已发送，等待服务器响应")
-        
-        self.test_state = TestState.LOAD_WITHOUT_DATA
-        self.test_details[self.test_state]["start_time"] = time.time()
-        self.test_results[self.test_state] = TestResult.RUNNING
-    
-    def _do_load_without_data_test(self):
-        """测试尝试加载可能不存在的数据"""
-        self.logger.info("测试: 尝试加载可能不存在的数据")
-        print("[测试] 6. 尝试加载账户数据(可能不存在)")
-        self._add_test_message("登录成功后尝试加载用户数据")
-        
-        self.caller.remote_call("userdata_load")
-        
-        self.test_state = TestState.SAVE_DATA
-        self.test_details[self.test_state]["start_time"] = time.time()
-        self.test_results[self.test_state] = TestResult.RUNNING
-    
-    def _do_save_data_test(self):
-        """测试保存测试数据"""
-        self.logger.info("测试: 保存数据")
-        print("\n[测试] 7. 保存新的测试数据")
-        self._add_test_message("保存测试数据")
-        
-        self.user_data = self.test_sample_data
-        self.caller.remote_call("userdata_save", json.dumps(self.test_sample_data))
-        
-        # 会在save_success回调中设置结果，但如果超时没有回应，我们也应该标记
-        # 这里不预设结果，让save_success回调来处理
-        
-        self.test_state = TestState.RECONNECT
-        self.test_details[self.test_state]["start_time"] = time.time()
-        self.test_results[self.test_state] = TestResult.RUNNING
-    
-    def _do_reconnect_test(self):
-        """测试断开连接并重连"""
-        self.logger.info("测试: 断开连接并重连")
-        print("[测试] 8. 断开连接并重连服务器")
-        
-        # 保存当前token
-        old_token = self.token
-        self.test_results["old_token"] = old_token
-        self._add_test_message(f"当前token: {old_token}")
-        self._add_test_message("正在断开连接...")
-        
-        # 断开连接
-        self.network_manager.close()
-        self.authenticated = False
-        
-        # 重新连接
-        reconnect_success = self.network_manager.connect()
-        if reconnect_success:
-            self._add_test_message("重连成功")
-            print(f"{ColorText.GREEN}[系统] 重连成功{ColorText.RESET}")
-            
-            # 标记当前测试为成功
-            self._mark_test_result(self.test_state, TestResult.SUCCESS, "成功断开并重新连接服务器")
-        else:
-            self._add_test_message("重连失败，将在下一个测试循环重试")
-            print(f"{ColorText.YELLOW}[系统] 重连等待中...{ColorText.RESET}")
-        
-        self.test_state = TestState.CHECK_TOKEN_INVALID
-        self.test_details[self.test_state]["start_time"] = time.time()
-        self.test_results[self.test_state] = TestResult.RUNNING
-        self.test_wait_time = 5.0  # 给重连多一点时间
-    
-    def _do_check_token_invalid_test(self):
-        """测试检查重连后token是否无效"""
-        self.logger.info("测试: 检查重连后token是否无效")
-        print("[测试] 9. 检查重连后token是否失效")
-        self._add_test_message("重连成功，检查token是否已失效")
-        
-        # 手动发送一个ping消息，测试连接
-        try:
-            self.logger.info("发送ping消息测试连接")
-            self._add_test_message("发送ping消息测试连接")
-            self.waiting_for_callback = True
-            self.caller.remote_call("ping_test")
-            
-            # 这里不再提前标记下一个测试状态
-            self._mark_test_result(self.test_state, TestResult.RUNNING, "Ping请求已发送，等待服务器响应")
-            
-        except Exception as e:
-            self.logger.error(f"发送ping消息失败: {str(e)}")
-            self._add_test_message(f"发送ping消息失败: {str(e)}")
-            self._mark_test_result(self.test_state, TestResult.ERROR, f"发送ping消息失败: {str(e)}")
-
-        self.test_wait_time = 2.0  # 恢复标准等待时间
-        self.test_state = TestState.LOAD_WITHOUT_LOGIN_2
-        self.test_details[self.test_state]["start_time"] = time.time()
-        self.test_results[self.test_state] = TestResult.RUNNING
-    def _do_load_without_login_2_test(self):
-        """测试重连后未登录状态加载数据"""
-        self.logger.info("测试: 重连后未登录状态加载数据")
-        print("[测试] 10. 重连后未登录状态加载数据(预期失败)")
-        self._add_test_message("重连后，未重新登录就尝试加载数据，预期失败")
-        
-        self.caller.remote_call("userdata_load")
-        
-        # 标记当前测试为已完成，等待auth_error回调来设置结果
-        self._mark_test_result(self.test_state, TestResult.SUCCESS, "重连后未登录状态下尝试加载数据，服务器正确拒绝")
-        
-        self.test_state = TestState.LOGIN_AGAIN
-        self.test_details[self.test_state]["start_time"] = time.time()
-        self.test_results[self.test_state] = TestResult.RUNNING
-    
-    def _do_login_again_test(self):
-        """测试重连后重新登录"""
-        self.logger.info("测试: 重连后重新登录")
-        print("[测试] 11. 重连后重新登录(预期成功)")
-        self._add_test_message("尝试重连后重新登录，预期成功")
-        
-        self.username = self.DEFAULT_USERNAME
-        self.password = self.DEFAULT_PASSWORD
-        self.caller.remote_call("client_login", self.username, self.password)
-        
-        # 立即标记当前测试为运行中
-        # login_success或login_failed回调将更新这个状态
-        self._mark_test_result(self.test_state, TestResult.RUNNING, "登录请求已发送，等待服务器响应")
-        
-        self.test_state = TestState.LOAD_DATA
-        self.test_details[self.test_state]["start_time"] = time.time()
-        self.test_results[self.test_state] = TestResult.RUNNING
-    
-    def _do_load_data_test(self):
-        """测试加载之前保存的数据"""
-        self.logger.info("测试: 加载之前保存的数据")
-        print("[测试] 12. 加载之前保存的测试数据")
-        self._add_test_message("尝试加载之前保存的测试数据")
-        
-        self.caller.remote_call("userdata_load")
-        
-        self.test_state = TestState.LOGOUT
-        self.test_details[self.test_state]["start_time"] = time.time()
-        self.test_results[self.test_state] = TestResult.RUNNING
-    
-    def _do_logout_test(self):
-        """测试退出登录"""
-        self.logger.info("测试: 退出登录")
-        print("[测试] 13. 退出登录(使token失效)")
-        self._add_test_message("尝试退出登录，使token失效，但保持连接")
-        
-        self.caller.remote_call("exit")
-        
-        # 立即标记当前测试为运行中
-        # exit_confirmed回调将更新这个状态
-        self._mark_test_result(self.test_state, TestResult.RUNNING, "退出请求已发送，等待服务器响应")
-        
-        self.test_state = TestState.COMPLETE
-        self.test_details[self.test_state]["start_time"] = time.time()
-        self.test_results[self.test_state] = TestResult.RUNNING
-    
-    def _do_complete_test(self):
-        """完成所有测试"""
-        self.logger.info("测试完成")
-        print("\n\n===== 自动化测试完成 =====")
-        current_time = time.time()
-        self._add_test_message("测试步骤已完成")
-        self.waiting_for_callback = False  # 确保不再等待任何回调
-        
-        # 在测试结果摘要前检查所有RUNNING状态的测试，将它们标记为SUCCESS
-        # 如果测试已经运行但没有明确的失败，我们假定它通过了
-        for state in TestState:
-            if state != TestState.INIT and state != TestState.COMPLETE:
-                if self.test_results.get(state) == TestResult.RUNNING:
-                    self._mark_test_result(state, TestResult.SUCCESS, f"测试{state.name}自动标记为成功")
-                elif self.test_results.get(state) == TestResult.PENDING:
-                    self._mark_test_result(state, TestResult.SKIPPED, f"测试{state.name}被跳过")
-        
-        # 打印测试结果摘要
-        print("\n\n===== 测试结果摘要 =====")
-        
-        success_count = 0
-        failure_count = 0
-        error_count = 0
-        skipped_count = 0
-        
-        for state in TestState:
-            if state != TestState.INIT and state != TestState.COMPLETE:
-                result = self.test_results.get(state, TestResult.PENDING)
-                state_name = state.name
-                result_value = result.value
-                result_color = ColorText.GREEN if result == TestResult.SUCCESS else \
-                              (ColorText.RED if result == TestResult.FAILURE else \
-                              ColorText.YELLOW)
-                print(f" - {state_name}: {result_color}{result_value}{ColorText.RESET}")
-                
-                # 统计结果
-                if result == TestResult.SUCCESS:
-                    success_count += 1
-                elif result == TestResult.FAILURE:
-                    failure_count += 1
-                elif result == TestResult.ERROR:
-                    error_count += 1
-                elif result == TestResult.SKIPPED:
-                    skipped_count += 1
-        
-        # 计算总体执行时间
-        total_time = time.time() - self.start_time
-        print(f"\n结果统计: 成功 {success_count}, 失败 {failure_count}, 错误 {error_count}, 跳过 {skipped_count}")
-        print(f"总执行时间: {total_time:.2f}秒")
-        self.logger.info(f"测试完成: 成功 {success_count}, 失败 {failure_count}, 错误 {error_count}, 跳过 {skipped_count}, 用时 {total_time:.2f}秒")
-        
-        print("\n程序将在5秒后退出...")
-        self.running = False
         
     def destroy(self):
         """销毁客户端实体，释放资源"""
@@ -894,14 +374,11 @@ class ClientEntity:
         try:
             self.logger.info("服务器请求登录")
             print("[服务器] 请求登录认证")
-            self._add_test_message("服务器要求进行登录认证")
             
-            if not self.login_in_progress and self.test_state == TestState.INIT:
+            if not self.login_in_progress:
                 print("使用默认凭据自动登录...")
-                # 不在初始测试流程中自动登录，遵循测试流程
         except Exception as e:
             self.logger.error(f"处理登录请求时错误: {str(e)}")
-            self._add_test_message(f"处理登录请求出错: {str(e)}")
     
     @EXPOSED
     def login_success(self, token):
@@ -910,16 +387,7 @@ class ClientEntity:
             if not token:
                 self.logger.warning("认证成功但收到空token！这是服务端错误！")
                 self.authenticated = False
-                print(f"{ColorText.RED}[登录] 异常: 服务器返回无效token{ColorText.RESET}")
-                self._add_test_message("严重错误: 服务端验证通过但返回空token")
-                
-                # 如果是正确凭据登录测试，标记为失败
-                if self.test_state == TestState.LOGIN_CORRECT_CREDENTIALS:
-                    self._mark_test_result(TestState.LOGIN_CORRECT_CREDENTIALS, TestResult.FAILURE, "服务端错误: 认证成功但返回空token")
-                # 如果是重新登录测试，标记为失败
-                elif self.test_state == TestState.LOGIN_AGAIN:
-                    self._mark_test_result(TestState.LOGIN_AGAIN, TestResult.FAILURE, "服务端错误: 认证成功但返回空token")
-                    
+                print(f"[登录] 异常: 服务器返回无效token")
                 return
                 
             self.authenticated = True
@@ -931,18 +399,10 @@ class ClientEntity:
             masked_token = token[:5] + "..." + token[-5:] if len(token) > 10 else "***"
             self.logger.info(f"认证成功，获取有效token: {masked_token}")
             
-            print(f"{ColorText.GREEN}[登录] 成功! 用户: {self.username}{ColorText.RESET}")
-            self._add_test_message(f"认证成功，用户: {self.username}")
-            
-            # 仅标记当前测试状态的结果，避免重复标记
-            if self.test_state == TestState.LOGIN_CORRECT_CREDENTIALS:
-                self._mark_test_result(TestState.LOGIN_CORRECT_CREDENTIALS, TestResult.SUCCESS, "使用正确凭据认证成功")
-            elif self.test_state == TestState.LOGIN_AGAIN:
-                self._mark_test_result(TestState.LOGIN_AGAIN, TestResult.SUCCESS, "重连后重新认证成功")
+            print(f"[登录] 成功! 用户: {self.username}")
                 
         except Exception as e:
             self.logger.error(f"处理登录成功回调时出错: {str(e)}")
-            self._add_test_message(f"处理登录成功回调出错: {str(e)}")
     
     @EXPOSED
     def kicked(self, reason):
@@ -951,7 +411,6 @@ class ClientEntity:
         self.token = None
         self.logger.warning(f"您的账号在其他设备登录，被迫下线: {reason}")
         print(f"[系统] 您已被服务器踢下线: {reason}")
-        self._add_test_message(f"被服务器踢下线: {reason}")
     
     @EXPOSED
     def server_shutdown(self, message):
@@ -959,13 +418,6 @@ class ClientEntity:
         self.logger.warning(f"服务器关闭通知: {message}")
         print(f"[系统] 服务器通知: {message}")
         print("服务器即将关闭，客户端将在3秒后退出...")
-        self._add_test_message(f"服务器关闭通知: {message}")
-        
-        # 标记所有未完成的测试为跳过
-        for state in TestState:
-            if state != TestState.INIT and state != TestState.COMPLETE:
-                if self.test_results.get(state)== TestResult.PENDING:
-                    self._mark_test_result(state, TestResult.SKIPPED, "服务器关闭，测试跳过")
         
         # 设置定时器在3秒后关闭客户端
         threading.Timer(3.0, self._exit_program).start()
@@ -986,21 +438,9 @@ class ClientEntity:
             
             self.logger.warning(f"登录失败: {reason}")
             print(f"[登录] 失败: {reason}")
-            self._add_test_message(f"登录失败: {reason}")
-            
-            # 如果是错误凭据登录测试，标记为成功(因为我们期望失败)
-            if self.test_state == TestState.LOGIN_WRONG_CREDENTIALS:
-                self._mark_test_result(TestState.LOGIN_WRONG_CREDENTIALS, TestResult.SUCCESS, "使用错误凭据登录，预期失败，测试通过")
-            # 如果是正确凭据登录测试，标记为失败
-            elif self.test_state == TestState.LOGIN_CORRECT_CREDENTIALS:
-                self._mark_test_result(TestState.LOGIN_CORRECT_CREDENTIALS, TestResult.FAILURE, f"使用正确凭据登录失败: {reason}")
-            # 如果是重新登录测试，标记为失败
-            elif self.test_state == TestState.LOGIN_AGAIN:
-                self._mark_test_result(TestState.LOGIN_AGAIN, TestResult.FAILURE, f"重连后重新登录失败: {reason}")
                 
         except Exception as e:
             self.logger.error(f"处理登录失败回调时出错: {str(e)}")
-            self._add_test_message(f"处理登录失败回调出错: {str(e)}")
     
     @EXPOSED
     def userdata_update(self, data_json):
@@ -1011,88 +451,27 @@ class ClientEntity:
             # 截断显示数据，避免过长输出
             data_preview = data_json[:50] + ("..." if len(data_json) > 50 else "")
             print(f"[数据] 已接收用户数据: {data_preview}")
-            self._add_test_message(f"接收用户数据成功")
-            
-            # 如果是加载用户数据测试，标记为成功
-            if self.test_state == TestState.LOAD_WITHOUT_DATA:
-                self._mark_test_result(TestState.LOAD_WITHOUT_DATA, TestResult.SUCCESS, "成功加载初始用户数据")
-            elif self.test_state == TestState.LOAD_DATA:
-                # 验证数据是否与保存的一致
-                try:
-                    loaded_data = json.loads(data_json)
-                    is_matching = True
-                    
-                    # 检查保存的关键字段
-                    for key in self.test_sample_data:
-                        if key not in loaded_data or loaded_data[key] != self.test_sample_data[key]:
-                            is_matching = False
-                            break
-                    
-                    if is_matching:
-                        self._mark_test_result(TestState.LOAD_DATA, TestResult.SUCCESS, "加载数据与保存的一致")
-                    else:
-                        self._mark_test_result(TestState.LOAD_DATA, TestResult.FAILURE, "加载的数据不匹配")
-                except:
-                    self._mark_test_result(TestState.LOAD_DATA, TestResult.ERROR, "验证数据时出错")
         except Exception as e:
             self.logger.error(f"解析数据失败: {str(e)}")
             print(f"[数据] 加载失败: {str(e)}")
-            
-            # 标记测试失败
-            if self.test_state == TestState.LOAD_WITHOUT_DATA:
-                self._mark_test_result(TestState.LOAD_WITHOUT_DATA, TestResult.ERROR, "解析数据错误")
-            elif self.test_state == TestState.LOAD_DATA:
-                self._mark_test_result(TestState.LOAD_DATA, TestResult.ERROR, "解析数据错误")
     
     @EXPOSED
     def save_success(self):
         """保存数据成功回调"""
         self.logger.info("数据保存成功")
         print("[数据] 保存成功")
-        self._add_test_message("数据保存成功")
-        
-        # 无论当前状态如何，只要SAVE_DATA测试状态为RUNNING，就标记其为成功
-        if self.test_results.get(TestState.SAVE_DATA) == TestResult.RUNNING:
-            self._mark_test_result(TestState.SAVE_DATA, TestResult.SUCCESS, "成功保存测试数据")
     
     @EXPOSED
     def data_error(self, message):
         """数据操作错误回调"""
         self.logger.warning(f"数据操作错误: {message}")
         print(f"[数据] 错误: {message}")
-        self._add_test_message(f"数据操作错误: {message}")
-        
-        # 根据当前测试状态标记测试结果
-        if self.test_state == TestState.SAVE_WITHOUT_LOGIN:
-            self._mark_test_result(TestState.SAVE_WITHOUT_LOGIN, TestResult.SUCCESS, "未登录状态下尝试保存数据，服务器正确拒绝")
-        elif self.test_state == TestState.LOAD_WITHOUT_LOGIN:
-            self._mark_test_result(TestState.LOAD_WITHOUT_LOGIN, TestResult.SUCCESS, "未登录状态下尝试加载数据，服务器正确拒绝")
-        elif self.test_state == TestState.LOAD_AFTER_FAILED_LOGIN:
-            self._mark_test_result(TestState.LOAD_AFTER_FAILED_LOGIN, TestResult.SUCCESS, "登录失败后尝试加载数据，服务器正确拒绝")
-        elif self.test_state == TestState.LOAD_WITHOUT_LOGIN_2:
-            self._mark_test_result(TestState.LOAD_WITHOUT_LOGIN_2, TestResult.SUCCESS, "重连后未登录状态下尝试加载数据，服务器正确拒绝")
-        elif self.test_state == TestState.SAVE_DATA:
-            self._mark_test_result(TestState.SAVE_DATA, TestResult.FAILURE, f"保存数据失败: {message}")
     
     @EXPOSED
     def auth_error(self, message):
         """认证错误回调"""
         self.logger.warning(f"认证错误: {message}")
         print(f"[认证] 错误: {message}")
-        self._add_test_message(f"认证错误: {message}")
-    
-        # 标记回调已完成
-        self.waiting_for_callback = False
-    
-        # 根据当前测试状态标记测试结果
-        if self.test_state == TestState.SAVE_WITHOUT_LOGIN:
-            self._mark_test_result(TestState.SAVE_WITHOUT_LOGIN, TestResult.SUCCESS, "未登录状态下尝试保存数据，服务器正确拒绝")
-        elif self.test_state == TestState.LOAD_WITHOUT_LOGIN:
-            self._mark_test_result(TestState.LOAD_WITHOUT_LOGIN, TestResult.SUCCESS, "未登录状态下尝试加载数据，服务器正确拒绝")
-        elif self.test_state == TestState.LOAD_AFTER_FAILED_LOGIN:
-            self._mark_test_result(TestState.LOAD_AFTER_FAILED_LOGIN, TestResult.SUCCESS, "登录失败后尝试加载数据，服务器正确拒绝")
-        elif self.test_state == TestState.LOAD_WITHOUT_LOGIN_2:
-            self._mark_test_result(TestState.LOAD_WITHOUT_LOGIN_2, TestResult.SUCCESS, "重连后未登录状态下尝试加载数据，服务器正确拒绝")
             
     @EXPOSED
     def recv_msg_from_server(self, stat, msg):
@@ -1110,23 +489,12 @@ class ClientEntity:
         """服务器确认退出的回调函数"""
         self.logger.info('服务器确认客户端退出')
         print("[系统] 服务器已确认退出请求")
-        self._add_test_message("服务器确认退出请求")
-        
-        # 无论当前状态如何，只要LOGOUT测试状态为RUNNING，就标记其为成功
-        if self.test_results.get(TestState.LOGOUT) == TestResult.RUNNING:
-            self._mark_test_result(TestState.LOGOUT, TestResult.SUCCESS, "成功退出登录，使token失效")
     
     @EXPOSED
     def pong_response(self, message):
         """服务器ping测试响应"""
         self.logger.info(f"收到服务器ping响应: {message}")
         print(f"[连接测试] {message}")
-        self._add_test_message(f"连接测试成功: {message}")
-        
-        # 无论当前状态如何，只要CHECK_TOKEN_INVALID测试状态为RUNNING，就标记其为成功
-        if self.test_results.get(TestState.CHECK_TOKEN_INVALID) == TestResult.RUNNING:
-            self._mark_test_result(TestState.CHECK_TOKEN_INVALID, TestResult.SUCCESS, 
-                                  "重连后通信恢复正常，测试通过")
 
 def main():
     # 解析命令行参数
