@@ -340,6 +340,18 @@ class GameServerEntity:
             
         # 将消息添加到队列，而不是立即处理
         self.pending_messages.append(("hello", stat, msg))
+    
+    @EXPOSED
+    def ping_test(self):
+        """连接测试方法，不需要认证，客户端可以用来检查连接是否有效"""
+        try:
+            self.update_activity_time()
+            self.logger.debug(f"收到客户端 {self.id} 的ping测试")
+            self._send_client_response("pong_response", "连接正常")
+            return True
+        except Exception as e:
+            self.logger.error(f"处理ping测试时出错: {str(e)}")
+            return False
         
     def process_messages(self):
         """批量处理积累的消息"""

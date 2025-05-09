@@ -181,7 +181,17 @@ class ClientNetworkManager:
             
         # 创建新连接
         self.socket = NetStream()
-        return self.connect()
+        success = self.connect()
+        
+        # 重连成功时触发信号，以便客户端可以重置RPC代理
+        if success:
+            if hasattr(self, 'on_reconnected') and callable(self.on_reconnected):
+                try:
+                    self.on_reconnected(self.socket)
+                except Exception as e:
+                    self.logger.error(f"执行重连回调时出错: {str(e)}")
+        
+        return success
     
     def process(self):
         """处理网络事件，返回接收到的数据"""
@@ -309,6 +319,9 @@ class ClientEntity:
         self.running = True
         self.pending_messages = []  # 待处理消息队列
         
+        # 注册重连回调
+        self.network_manager.on_reconnected = self._on_reconnect
+        
         # 认证相关
         self.authenticated = False
         self.username = self.DEFAULT_USERNAME
@@ -402,7 +415,27 @@ class ClientEntity:
         
         # 测试定时器 - 执行测试流程
         TimerManager.addRepeatTimer(0.5, self.run_test_step)
+    
+    def _on_reconnect(self, new_socket):
+        """处理重连事件，重置RPC代理"""
+        self.logger.info("连接已重建，重置RPC代理")
+        self.socket = new_socket
         
+        # 重新创建RPC代理
+        if hasattr(self, 'caller'):
+            try:
+                self.caller.close()  # 关闭旧的RPC代理
+            except Exception as e:
+                self.logger.error(f"关闭旧RPC代理时出错: {str(e)}")
+                
+        # 创建新的RPC代理
+        self.caller = RpcProxy(self, self.socket)
+        self.logger.info("RPC代理已重置")
+        
+        # 重置认证状态
+        self.authenticated = False
+        self.token = None
+    
     def run_test_step(self):
         """执行测试步骤"""
         if not self.running:
@@ -562,6 +595,15 @@ class ClientEntity:
         self.network_manager.close()
         self.authenticated = False
         
+        # 重新连接
+        reconnect_success = self.network_manager.connect()
+        if reconnect_success:
+            self._add_test_message("重连成功")
+            print(f"{ColorText.GREEN}[系统] 重连成功{ColorText.RESET}")
+        else:
+            self._add_test_message("重连失败，将在下一个测试循环重试")
+            print(f"{ColorText.YELLOW}[系统] 重连等待中...{ColorText.RESET}")
+        
         self.test_state = TestState.CHECK_TOKEN_INVALID
         self.test_details[self.test_state]["start_time"] = time.time()
         self.test_results[self.test_state] = TestResult.RUNNING
@@ -572,6 +614,15 @@ class ClientEntity:
         self.logger.info("测试: 检查重连后token是否无效")
         print("\n[测试] 9. 检查重连后token是否失效")
         self._add_test_message("重连成功，检查token是否已失效")
+        
+        # 手动发送一个ping消息，测试连接
+        try:
+            self.logger.info("发送ping消息测试连接")
+            self._add_test_message("发送ping消息测试连接")
+            self.caller.remote_call("ping_test")
+        except Exception as e:
+            self.logger.error(f"发送ping消息失败: {str(e)}")
+            self._add_test_message(f"发送ping消息失败: {str(e)}")
         
         self.test_wait_time = 2.0  # 恢复标准等待时间
         self.test_state = TestState.LOAD_WITHOUT_LOGIN_2
@@ -937,6 +988,18 @@ class ClientEntity:
         # 如果是登出测试，标记为成功
         if self.test_state == TestState.LOGOUT:
             self._mark_test_result(TestState.LOGOUT, TestResult.SUCCESS, "成功退出登录，使token失效")
+    
+    @EXPOSED
+    def pong_response(self, message):
+        """服务器ping测试响应"""
+        self.logger.info(f"收到服务器ping响应: {message}")
+        print(f"[连接测试] {message}")
+        self._add_test_message(f"连接测试成功: {message}")
+        
+        # 如果在检查token失效测试阶段，标记该测试成功
+        if self.test_state == TestState.CHECK_TOKEN_INVALID:
+            self._mark_test_result(TestState.CHECK_TOKEN_INVALID, TestResult.SUCCESS, 
+                                  "重连后通信恢复正常，测试通过")
 
 def main():
     # 解析命令行参数

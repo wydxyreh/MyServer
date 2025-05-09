@@ -16,21 +16,43 @@ import json
 from server.common.logger import logger_instance
 
 class RpcProxy(object):
-	def __init__(self, owner, netstream):
-		self.owner = owner
-		self.netstream = netstream
+	"""远程过程调用代理，负责RPC调用的序列化和反序列化"""
+	def __init__(self, entity, netstream):
+		super(RpcProxy, self).__init__()
+		
+		# 初始化日志记录器
 		self.logger = logger_instance.get_logger('RpcProxy')
+		
+		if hasattr(entity, 'EXPOSED_FUNC'):
+			entity.EXPOSED_FUNC = {} # 初始化EXPOSED_FUNC
+			
+		# 获取所有标记为exposed的方法
+		for name in dir(entity):
+			method = getattr(entity, name)
+			if hasattr(method, '__exposed__') and method.__exposed__:
+				entity.EXPOSED_FUNC[name] = method
+		
+		self.entity = entity
+		self.netstream = netstream
+		self._is_closed = False
 
 	def close(self):
-		self.owner = None
+		"""关闭RPC代理，清理引用"""
+		self._is_closed = True
+		self.entity = None
 		self.netstream = None
 
 	def remote_call(self, funcname, *args):
 		try:
+			# 检查RPC代理是否已关闭
+			if self._is_closed:
+				self.logger.warning(f"尝试通过已关闭的RPC代理调用方法: {funcname}")
+				return
+				
 			# 直接使用netstream对象
 			netstream = self.netstream
-			if not netstream:
-				self.logger.warning(f"尝试对已关闭的连接调用RPC: {funcname}")
+			if not netstream or netstream.status() != conf.NET_STATE_ESTABLISHED:
+				self.logger.warning(f"尝试对未连接或已关闭的socket调用RPC: {funcname}")
 				return
 				
 			info = b""  # 确保使用字节串
@@ -68,12 +90,17 @@ class RpcProxy(object):
 
 	def parse_rpc(self, data):
 		try:
+			# 检查RPC代理是否已关闭
+			if self._is_closed:
+				self.logger.warning("尝试通过已关闭的RPC代理解析数据")
+				return
+			
 			func = None
 			args = []
-			owner = self.owner
+			entity = self.entity  # 修正: owner -> entity
 			netstream = self.netstream
 			
-			if not owner or not netstream:
+			if not entity or not netstream:
 				self.logger.warning("尝试解析RPC时，发现对象已被回收")
 				return
 				
@@ -88,7 +115,11 @@ class RpcProxy(object):
 					self.logger.error(f"ProtoBuf解析失败: {str(e)}")
 					return
 					
-				func = getattr(owner, method, None)
+				# 修正: 使用entity替代owner
+				if hasattr(entity, 'EXPOSED_FUNC') and method in entity.EXPOSED_FUNC:
+					func = entity.EXPOSED_FUNC[method]
+				else:
+					func = getattr(entity, method, None)
 			else:
 				try:
 					info = json.loads(data.decode('utf-8'))
@@ -100,11 +131,15 @@ class RpcProxy(object):
 				except json.JSONDecodeError as e:
 					self.logger.error(f"JSON解析失败: {str(e)}")
 					return
-					
-				func = getattr(owner, method, None)
+				
+				# 修正: 使用entity替代owner
+				if hasattr(entity, 'EXPOSED_FUNC') and method in entity.EXPOSED_FUNC:
+					func = entity.EXPOSED_FUNC[method]
+				else:
+					func = getattr(entity, method, None)
 				
 			if func:
-				if getattr(func, '__exposed__', False):
+				if hasattr(entity, 'EXPOSED_FUNC') and method in entity.EXPOSED_FUNC or getattr(func, '__exposed__', False):
 					try:
 						func(*args)
 					except Exception as e:
@@ -115,6 +150,8 @@ class RpcProxy(object):
 				self.logger.warning(f'无效RPC调用，方法不存在: {method}')
 		except Exception as e:
 			self.logger.error(f"RPC解析过程中发生错误: {str(e)}")
+			import traceback
+			traceback.print_exc()
 
 
 class NetStream(object):
