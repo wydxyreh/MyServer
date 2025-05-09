@@ -202,7 +202,7 @@ class DatabaseManager:
                 # 更新或插入用户数据
                 cursor.execute(
                     """
-                    INSERT OR REPLACEINTO user_data (username, data_json, updated_at)
+                    INSERT OR REPLACE INTO user_data (username, data_json, updated_at)
                     VALUES (?, ?, CURRENT_TIMESTAMP)
                     """,
                     (username, data_json)
@@ -244,6 +244,13 @@ class DatabaseManager:
             import traceback
             self.logger.error(traceback.format_exc())
             return None
+    
+    def cleanup(self):
+        """清理资源，在服务器关闭时调用"""
+        self.logger.info("清理数据库管理器资源")
+        # 释放所有活动的令牌
+        self.active_tokens.clear()
+        # 如果有连接池或其他需要释放的资源，可以在这里处理
 
 # 单例模式
 db_manager = DatabaseManager()

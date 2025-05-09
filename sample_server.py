@@ -691,7 +691,7 @@ if __name__ == "__main__":
         if result != 0:
             logger.error(f"服务器启动失败，端口 {args.port} 可能已被占用")
             sys.exit(1)
-            
+        
         logger.info(f"服务器已启动，正在监听 {args.bind}:{args.port}...")
         
         # 主循环 - 只运行定时器调度
@@ -723,6 +723,18 @@ if __name__ == "__main__":
             
             # 清理资源
             logger.info("正在清理资源...")
-            db_manager.cleanup()
+            try:
+                db_manager.cleanup()
+            except Exception as e:
+                logger.error(f"清理数据库资源时出错: {str(e)}")
+                logger.error(traceback.format_exc())
+            
+            # 添加一个额外的清理日志记录，确保即使出现错误也能记录
+            cleanup_logger = logger_instance.get_logger('Cleanup')
+            cleanup_logger.info("正在清理全局资源...")
+            
+            # 强制执行垃圾收集以释放所有资源
+            gc.collect()
+            cleanup_logger.info("已执行垃圾回收以释放socket资源")
             
         logger.info("服务器已完全关闭。")

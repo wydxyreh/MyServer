@@ -81,3 +81,6 @@ C:\Users\wydx\Documents\Unreal Projects\Server\sample_client.py
 2.优化其登录逻辑，添加各种错误处理，并提高鲁棒性；
 3.优化服务端客户端性能
 4.将其进行模块化设计和整合，降低各个模块和函数的耦合度
+
+优化客户端和服务端的代码，将客户端目前的选项交互方式进行大幅度修改，每个选项不再是通过信息输入选择，而是写死在代码中，由一个函数def test来逐个测试客户端与服务端通信和交互方式，每个函数的输入参数均在def test函数开头由变量定义；
+def test主要依次测试：save失败（未登录），load失败（未登录），login账密登录失败（账密错误）、load失败（未登录）、login账密登录成功（账密正确），load失败（该账密下没有对应的json数据），save成功（将样例json存储在对应账密下），reconnect，login（token登录无效），load失败（未登录），login账密登录成功（账密正确），load成功（成功从该账密下读取数据），logout（退出登录，主动使token失效，但仍然保持同一连接）

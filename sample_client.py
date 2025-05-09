@@ -5,13 +5,11 @@ import time
 import argparse
 import socket
 import threading
-import queue
-import weakref
-import select
 import json
-import getpass
 import traceback
 import signal
+import datetime
+from enum import Enum, auto
 
 # 添加当前目录到Python路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -21,9 +19,45 @@ from server.network.netStream import NetStream, RpcProxy
 from server.common.logger import logger_instance
 from server.common.timer import TimerManager
 
+# 定义ANSI转义序列用于控制台颜色
+class ColorText:
+    RESET = "\033[0m"
+    RED = "\033[91m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    BLUE = "\033[94m"
+    CYAN = "\033[96m"
+
 def EXPOSED(func):
     func.__exposed__ = True
     return func
+
+# 测试状态枚举
+class TestState(Enum):
+    INIT = auto()
+    SAVE_WITHOUT_LOGIN = auto()
+    LOAD_WITHOUT_LOGIN = auto()
+    LOGIN_WRONG_CREDENTIALS = auto()
+    LOAD_AFTER_FAILED_LOGIN = auto()
+    LOGIN_CORRECT_CREDENTIALS = auto()
+    LOAD_WITHOUT_DATA = auto()
+    SAVE_DATA = auto()
+    RECONNECT = auto()
+    CHECK_TOKEN_INVALID = auto()
+    LOAD_WITHOUT_LOGIN_2 = auto()
+    LOGIN_AGAIN = auto()
+    LOAD_DATA = auto()
+    LOGOUT = auto()
+    COMPLETE = auto()
+
+# 测试结果状态枚举
+class TestResult(Enum):
+    PENDING = "pending"   # 等待执行
+    RUNNING = "running"   # 正在执行
+    SUCCESS = "success"   # 测试成功
+    FAILURE = "failure"   # 测试失败
+    SKIPPED = "skipped"   # 测试跳过
+    ERROR = "error"       # 测试错误
 
 class ClientNetworkManager:
     """客户端网络管理器，整合了NetworkSocket的心跳机制和NetStream的RPC功能"""
@@ -50,6 +84,10 @@ class ClientNetworkManager:
         self.bytes_received = 0
         self.latency_samples = []
         self.last_ping_time = 0
+        
+        # 用于自动测试
+        self.last_connection_attempt = 0
+        self.connection_retry_interval = 1.0  # 重试间隔
         
     def connect(self):
         """连接到服务器"""
@@ -277,7 +315,6 @@ class ClientEntity:
         self.stat = 0
         self.logger = logger_instance.get_logger('SampleClient')
         self.running = True
-        self.command_queue = queue.Queue()
         self.pending_messages = []  # 待处理消息队列
         
         # 认证相关
@@ -286,34 +323,70 @@ class ClientEntity:
         self.password = self.DEFAULT_PASSWORD
         self.token = None
         self.login_in_progress = False
-        self.login_attempts = 0  # 添加登录尝试计数器
+        self.login_attempts = 0
         
         # 用户数据
         self.user_data = {}
         
-        # 初始化命令处理器映射
-        self._init_command_handlers()
-        # 命令处理回调
-        self.on_command_input = None
+        # 自动测试相关
+        self.test_state = TestState.INIT
+        self.last_test_time = time.time()
+        self.test_wait_time = 2.0  # 测试步骤间隔
+        self.test_results = {}  # 测试结果记录
+        self.test_details = {}  # 测试详细信息
+        self.start_time = time.time()  # 测试开始时间
+        
+        # 初始化测试结果
+        for state in TestState:
+            if state != TestState.INIT:  # 包含COMPLETE状态
+                self.test_results[state] = TestResult.PENDING
+                self.test_details[state] = {"start_time": 0, "end_time": 0, "messages": []}
+        
+        self.test_sample_data = {
+            "name": self.DEFAULT_USERNAME,
+            "bullet": 50,
+            "exp": 100,
+            "test_items": ["sword", "shield"],
+            "settings": {"difficulty": "hard", "sound": True}
+        }
         
         # 设置定时器
         self._setup_timers()
         
-    def _init_command_handlers(self):
-        """初始化命令处理器映射"""
-        self.command_handlers = {
-            'send': self.handle_send_command,
-            'exit': self.handle_exit_command,
-            'help': self.handle_help_command,
-            'status': self.handle_status_command,
-            'reconnect': self.handle_reconnect_command,
-            'login': self.handle_login_command,
-            'save': self.handle_save_command,
-            'load': self.handle_load_command,
-            'data': self.handle_data_command,
-            'set': self.handle_set_command
-        }
+        # 打印欢迎信息
+        self._print_welcome_message()
         
+    def _print_welcome_message(self):
+        """打印测试客户端欢迎信息"""
+        welcome_msg = "\n" + "="*60 + "\n" + "服务器通信自动测试客户端".center(58) + "\n" + \
+                      f"开始时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}" + "\n" + "="*60 + "\n"
+        print(welcome_msg)
+        self.logger.info("测试客户端启动")
+        self.logger.info(welcome_msg)
+    
+    def _add_test_message(self, message):
+        """添加测试消息到当前测试状态的详细信息中"""
+        if self.test_state in self.test_details:
+            self.test_details[self.test_state]["messages"].append(
+                f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {message}"
+            )
+            self.logger.info(f"测试消息[{self.test_state.name}]: {message}")
+    
+    def _mark_test_result(self, test_state, result, message=None):
+        """标记测试结果并添加消息"""
+        if test_state in self.test_results:
+            self.test_results[test_state] = result
+            self.test_details[test_state]["end_time"] = time.time()
+            
+            if message:
+                self._add_test_message(message)
+                
+            # 记录测试结果
+            result_str = f"测试[{test_state.name}]: {result.value}"
+            duration = self.test_details[test_state]["end_time"] - self.test_details[test_state]["start_time"]
+            self.logger.info(f"{result_str} (耗时: {duration:.2f}秒)")
+            print(f"[测试结果] {result_str} (耗时: {duration:.2f}秒)")
+            
     def _setup_timers(self):
         """设置定时器"""
         # 10ms定时器 - 处理网络
@@ -321,6 +394,282 @@ class ClientEntity:
         
         # 100ms定时器 - 处理消息
         TimerManager.addRepeatTimer(0.1, self.process_messages)
+        
+        # 测试定时器 - 执行测试流程
+        TimerManager.addRepeatTimer(0.5, self.run_test_step)
+        
+    def run_test_step(self):
+        """执行测试步骤"""
+        if not self.running:
+            return
+            
+        # 确保网络已连接
+        if not self.network_manager.connected:
+            current_time = time.time()
+            if current_time - self.network_manager.last_connection_attempt >= self.network_manager.connection_retry_interval:
+                self.network_manager.last_connection_attempt = current_time
+                self.logger.info("测试: 尝试连接服务器...")
+                self.network_manager.connect()
+            return
+            
+        # 等待一定时间间隔再执行下一步测试
+        current_time = time.time()
+        if current_time - self.last_test_time < self.test_wait_time:
+            return
+            
+        # 执行当前测试状态对应的步骤
+        self.last_test_time = current_time
+        
+        # 根据不同的测试状态执行对应的测试步骤
+        if self.test_state == TestState.INIT:
+            self._do_init_test()
+        elif self.test_state == TestState.SAVE_WITHOUT_LOGIN:
+            self._do_save_without_login_test()
+        elif self.test_state == TestState.LOAD_WITHOUT_LOGIN:
+            self._do_load_without_login_test()
+        elif self.test_state == TestState.LOGIN_WRONG_CREDENTIALS:
+            self._do_login_wrong_credentials_test()
+        elif self.test_state == TestState.LOAD_AFTER_FAILED_LOGIN:
+            self._do_load_after_failed_login_test()
+        elif self.test_state == TestState.LOGIN_CORRECT_CREDENTIALS:
+            self._do_login_correct_credentials_test()
+        elif self.test_state == TestState.LOAD_WITHOUT_DATA:
+            self._do_load_without_data_test()
+        elif self.test_state == TestState.SAVE_DATA:
+            self._do_save_data_test()
+        elif self.test_state == TestState.RECONNECT:
+            self._do_reconnect_test()
+        elif self.test_state == TestState.CHECK_TOKEN_INVALID:
+            self._do_check_token_invalid_test()
+        elif self.test_state == TestState.LOAD_WITHOUT_LOGIN_2:
+            self._do_load_without_login_2_test()
+        elif self.test_state == TestState.LOGIN_AGAIN:
+            self._do_login_again_test()
+        elif self.test_state == TestState.LOAD_DATA:
+            self._do_load_data_test()
+        elif self.test_state == TestState.LOGOUT:
+            self._do_logout_test()
+        elif self.test_state == TestState.COMPLETE:
+            self._do_complete_test()
+    
+    def _do_init_test(self):
+        """初始化测试步骤"""
+        self.logger.info("测试初始化完成，开始测试流程")
+        print("\n\n===== 开始自动化测试流程 =====")
+        self.test_state = TestState.SAVE_WITHOUT_LOGIN
+        self.test_details[self.test_state]["start_time"] = time.time()
+        self.test_results[self.test_state] = TestResult.RUNNING
+    
+    def _do_save_without_login_test(self):
+        """测试未登录状态下保存数据"""
+        self.logger.info("测试: 未登录状态下保存数据")
+        print("\n[测试] 1. 未登录状态下保存数据(预期失败)")
+        self._add_test_message("发送保存数据请求，预期服务器会拒绝未登录状态的请求")
+        
+        self.caller.remote_call("userdata_save", json.dumps(self.test_sample_data))
+        
+        self.test_state = TestState.LOAD_WITHOUT_LOGIN
+        self.test_details[self.test_state]["start_time"] = time.time()
+        self.test_results[self.test_state] = TestResult.RUNNING
+    
+    def _do_load_without_login_test(self):
+        """测试未登录状态下加载数据"""
+        self.logger.info("测试: 未登录状态下加载数据")
+        print("\n[测试] 2. 未登录状态下加载数据(预期失败)")
+        self._add_test_message("发送加载数据请求，预期服务器会拒绝未登录状态的请求")
+        
+        self.caller.remote_call("userdata_load")
+        
+        self.test_state = TestState.LOGIN_WRONG_CREDENTIALS
+        self.test_details[self.test_state]["start_time"] = time.time()
+        self.test_results[self.test_state] = TestResult.RUNNING
+    
+    def _do_login_wrong_credentials_test(self):
+        """测试使用错误凭据登录"""
+        self.logger.info("测试: 错误凭据登录")
+        print("\n[测试] 3. 使用错误的账号密码登录(预期失败)")
+        self._add_test_message("尝试使用错误的账号密码登录，预期失败")
+        
+        self.username = "wrong_user"
+        self.password = "wrong_pass"
+        self.caller.remote_call("client_login", self.username, self.password)
+        
+        self.test_state = TestState.LOAD_AFTER_FAILED_LOGIN
+        self.test_details[self.test_state]["start_time"] = time.time()
+        self.test_results[self.test_state] = TestResult.RUNNING
+    
+    def _do_load_after_failed_login_test(self):
+        """测试登录失败后加载数据"""
+        self.logger.info("测试: 登录失败后加载数据")
+        print("\n[测试] 4. 登录失败后加载数据(预期失败)")
+        self._add_test_message("登录失败后尝试加载数据，预期失败")
+        
+        self.caller.remote_call("userdata_load")
+        
+        self.test_state = TestState.LOGIN_CORRECT_CREDENTIALS
+        self.test_details[self.test_state]["start_time"] = time.time()
+        self.test_results[self.test_state] = TestResult.RUNNING
+    
+    def _do_login_correct_credentials_test(self):
+        """测试使用正确凭据登录"""
+        self.logger.info("测试: 正确凭据登录")
+        print("\n[测试] 5. 使用正确的账号密码登录(预期成功)")
+        self._add_test_message("尝试使用正确的账号密码登录，预期成功")
+        
+        self.username = self.DEFAULT_USERNAME
+        self.password = self.DEFAULT_PASSWORD
+        self.caller.remote_call("client_login", self.username, self.password)
+        
+        self.test_state = TestState.LOAD_WITHOUT_DATA
+        self.test_details[self.test_state]["start_time"] = time.time()
+        self.test_results[self.test_state] = TestResult.RUNNING
+    
+    def _do_load_without_data_test(self):
+        """测试尝试加载可能不存在的数据"""
+        self.logger.info("测试: 尝试加载可能不存在的数据")
+        print("\n[测试] 6. 尝试加载账户数据(可能不存在)")
+        self._add_test_message("登录成功后尝试加载用户数据")
+        
+        self.caller.remote_call("userdata_load")
+        
+        self.test_state = TestState.SAVE_DATA
+        self.test_details[self.test_state]["start_time"] = time.time()
+        self.test_results[self.test_state] = TestResult.RUNNING
+    
+    def _do_save_data_test(self):
+        """测试保存测试数据"""
+        self.logger.info("测试: 保存测试数据")
+        print("\n[测试] 7. 保存新的测试数据")
+        self._add_test_message(f"尝试保存测试数据: {json.dumps(self.test_sample_data, indent=2)}")
+        
+        self.user_data = self.test_sample_data
+        self.caller.remote_call("userdata_save", json.dumps(self.test_sample_data))
+        
+        self.test_state = TestState.RECONNECT
+        self.test_details[self.test_state]["start_time"] = time.time()
+        self.test_results[self.test_state] = TestResult.RUNNING
+    
+    def _do_reconnect_test(self):
+        """测试断开连接并重连"""
+        self.logger.info("测试: 断开连接并重连")
+        print("\n[测试] 8. 断开连接并重连服务器")
+        
+        # 保存当前token
+        old_token = self.token
+        self.test_results["old_token"] = old_token
+        self._add_test_message(f"当前token: {old_token}")
+        self._add_test_message("正在断开连接...")
+        
+        # 断开连接
+        self.network_manager.close()
+        self.authenticated = False
+        
+        self.test_state = TestState.CHECK_TOKEN_INVALID
+        self.test_details[self.test_state]["start_time"] = time.time()
+        self.test_results[self.test_state] = TestResult.RUNNING
+        self.test_wait_time = 5.0  # 给重连多一点时间
+    
+    def _do_check_token_invalid_test(self):
+        """测试检查重连后token是否无效"""
+        self.logger.info("测试: 检查重连后token是否无效")
+        print("\n[测试] 9. 检查重连后token是否失效")
+        self._add_test_message("重连成功，检查token是否已失效")
+        
+        self.test_wait_time = 2.0  # 恢复标准等待时间
+        self.test_state = TestState.LOAD_WITHOUT_LOGIN_2
+        self.test_details[self.test_state]["start_time"] = time.time()
+        self.test_results[self.test_state] = TestResult.RUNNING
+    
+    def _do_load_without_login_2_test(self):
+        """测试重连后未登录状态加载数据"""
+        self.logger.info("测试: 重连后未登录状态加载数据")
+        print("\n[测试] 10. 重连后未登录状态加载数据(预期失败)")
+        self._add_test_message("重连后，未重新登录就尝试加载数据，预期失败")
+        
+        self.caller.remote_call("userdata_load")
+        
+        self.test_state = TestState.LOGIN_AGAIN
+        self.test_details[self.test_state]["start_time"] = time.time()
+        self.test_results[self.test_state] = TestResult.RUNNING
+    
+    def _do_login_again_test(self):
+        """测试重连后重新登录"""
+        self.logger.info("测试: 重连后重新登录")
+        print("\n[测试] 11. 重连后重新登录(预期成功)")
+        self._add_test_message("尝试重连后重新登录，预期成功")
+        
+        self.username = self.DEFAULT_USERNAME
+        self.password = self.DEFAULT_PASSWORD
+        self.caller.remote_call("client_login", self.username, self.password)
+        
+        self.test_state = TestState.LOAD_DATA
+        self.test_details[self.test_state]["start_time"] = time.time()
+        self.test_results[self.test_state] = TestResult.RUNNING
+    
+    def _do_load_data_test(self):
+        """测试加载之前保存的数据"""
+        self.logger.info("测试: 加载之前保存的数据")
+        print("\n[测试] 12. 加载之前保存的测试数据")
+        self._add_test_message("尝试加载之前保存的测试数据")
+        
+        self.caller.remote_call("userdata_load")
+        
+        self.test_state = TestState.LOGOUT
+        self.test_details[self.test_state]["start_time"] = time.time()
+        self.test_results[self.test_state] = TestResult.RUNNING
+    
+    def _do_logout_test(self):
+        """测试退出登录"""
+        self.logger.info("测试: 退出登录")
+        print("\n[测试] 13. 退出登录(使token失效)")
+        self._add_test_message("尝试退出登录，使token失效，但保持连接")
+        
+        self.caller.remote_call("exit")
+        
+        self.test_state = TestState.COMPLETE
+        self.test_details[self.test_state]["start_time"] = time.time()
+        self.test_results[self.test_state] = TestResult.RUNNING
+    
+    def _do_complete_test(self):
+        """完成所有测试"""
+        self.logger.info("所有测试完成")
+        print("\n\n===== 自动化测试完成 =====")
+        current_time = time.time()
+        self._add_test_message("所有测试步骤已完成")
+        
+        # 打印测试结果摘要
+        print("\n\n===== 自动化测试完成 =====")
+        print("\n测试结果摘要:")
+        
+        for state in TestState:
+            if state != TestState.INIT and state != TestState.COMPLETE:
+                result = self.test_results.get(state, TestResult.PENDING)
+                state_name = state.name
+                result_value = result.value
+                result_color = ColorText.GREEN if result == TestResult.SUCCESS else \
+                              (ColorText.RED if result == TestResult.FAILURE else \
+                              ColorText.YELLOW)
+                print(f" - {state_name}: {result_color}{result_value}{ColorText.RESET}")
+                
+                # 记录到日志
+                self.logger.info(f"测试[{state_name}]: {result_value}")
+                
+                # 记录详细消息
+                if state in self.test_details:
+                    details = self.test_details[state]
+                    duration = details["end_time"] - details["start_time"] if details["end_time"] > 0 else 0
+                    self.logger.info(f"  耗时: {duration:.2f}秒, 消息: {len(details['messages'])}")
+                    
+                    for msg in details["messages"]:
+                        self.logger.info(f"    - {msg}")
+        
+        # 计算总体执行时间
+        total_time = time.time() - self.start_time
+        print(f"\n总执行时间: {total_time:.2f}秒")
+        self.logger.info(f"测试总执行时间: {total_time:.2f}秒")
+        
+        print("\n程序将在5秒后退出...")
+        self.running = False
         
     def destroy(self):
         """销毁客户端实体，释放资源"""
@@ -362,261 +711,21 @@ class ClientEntity:
                 
         # 清空消息队列
         self.pending_messages = []
-
-    def _print_prompt(self, message=None):
-        """打印提示消息和命令提示符"""
-        if message:
-            print(f"\n{message}")
-        print("\n> ", end='', flush=True)
-
-    def handle_send_command(self, args=None):
-        """处理发送消息命令"""
-        # 如果有提供消息参数，直接使用
-        if args and len(args) > 0:
-            message = ' '.join(args)
-            if message.strip():  # 检查消息是否为空
-                self._send_message(message)
-            else:
-                self._print_prompt("消息不能为空，请重新输入")
-        else:
-            # 提示用户输入消息
-            print("请输入要发送的消息: ", end='', flush=True)
-            # 设置回调以处理用户输入的消息
-            self.on_command_input = self._send_message_with_check
-        
-    def _send_message_with_check(self, message):
-        """检查消息内容并发送"""
-        if not message.strip():  # 检查消息是否为空
-            print("消息不能为空，请重新输入: ", end='', flush=True)
-            # 保持回调，让用户重新输入
-            return
-            
-        self._send_message(message)
-        
-    def _send_message(self, message):
-        """发送消息到服务器"""
-        self.logger.info(f'客户端发送新消息: {message}')
-        self.caller.remote_call("hello_world_from_client", self.stat + 1, message)
-        # 重置回调
-        self.on_command_input = None
-        self._print_prompt()
     
-    def handle_exit_command(self, args=None):
-        """处理退出命令"""
-        self.logger.info('客户端发送退出请求')
-        self.caller.remote_call("exit")
-    
-    def handle_reconnect_command(self, args=None):
-        """处理重连命令"""
-        print("\n正在尝试重新连接到服务器...")
-        if self.network_manager.connected:
-            self.network_manager.close()
-        
-        if self.network_manager.connect():
-            self._print_prompt("重新连接成功!")
-        else:
-            self._print_prompt("重新连接失败，将继续尝试自动重连")
-    
-    def handle_help_command(self, args=None):
-        """显示帮助信息"""
-        help_text = """
-        可用命令:
-        send <消息>  - 发送消息到服务器
-        exit         - 退出客户端
-        status       - 显示连接状态
-        reconnect    - 重新连接服务器
-        login        - 登录账户
-        save         - 保存用户数据
-        load         - 加载用户数据
-        data         - 显示当前用户数据
-        set <键> <值> - 设置用户数据
-        help         - 显示此帮助信息
-        """
-        self._print_prompt(help_text)
-    
-    def handle_status_command(self, args=None):
-        """显示连接状态"""
-        if self.network_manager.connected:
-            uptime = int(time.time() - self.network_manager.setup_time)
-            avg_latency = sum(self.network_manager.latency_samples) / len(self.network_manager.latency_samples) if self.network_manager.latency_samples else 0
-            
-            status_info = f"""
-            连接状态: 已连接
-            服务器地址: {self.network_manager.host}:{self.network_manager.port}
-            连接时长: {uptime}秒
-            心跳次数: {self.network_manager.heartbeat_count}
-            平均网络延迟: {avg_latency:.2f}ms
-            已发送: {self.network_manager.bytes_sent} 字节
-            已接收: {self.network_manager.bytes_received} 字节
-            """
-        else:
-            status_info = "\n连接状态: 未连接"
-            if self.network_manager.reconnect_attempts > 0:
-                status_info += f"\n正在尝试重连 ({self.network_manager.reconnect_attempts}/{self.network_manager.max_reconnect_attempts})"
-        
-        self._print_prompt(status_info)
-    
-    def process_command(self, command_line):
-        """处理用户输入命令"""
-        try:
-            # 如果有回调函数在等待输入，则调用它
-            if self.on_command_input:
-                callback = self.on_command_input
-                # 注意：不立即清除回调，让回调函数决定是否清除
-                callback(command_line)
-                return True
-                
-            # 命令行为空，仅显示提示符
-            if not command_line.strip():
-                self._print_prompt()
-                return True
-                
-            # 否则按正常命令处理
-            parts = command_line.strip().split(maxsplit=1)
-            command = parts[0].lower() if parts else ""
-            args = parts[1:] if len(parts) > 1 else []
-            
-            if command in self.command_handlers:
-                self.command_handlers[command](args)
-            elif command:
-                self._print_prompt(f"未知命令: {command}，输入 'help' 查看可用命令")
-            
-            return True
-        except Exception as e:
-            self.logger.error(f"处理命令时出错: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            self._print_prompt()
-            return False
-            
-    def _handle_auth_action(self, action_name, auth_required=True, callback=None):
-        """处理需要认证的操作"""
-        if auth_required and not self.authenticated:
-            self._print_prompt("请先登录")
-            return False
-            
-        if callback:
-            callback()
-        return True
-    
-    def handle_login_command(self, args=None):
-        """处理登录命令"""
-        if self.authenticated:
-            self._print_prompt(f"您已经以 {self.username} 登录")
-            return
-            
-        if not args:
-            # 交互式登录
-            print("\n请输入用户名: ", end='', flush=True)
-            self.on_command_input = self._get_username_input
-        else:
-            # 直接登录
-            self.username = args[0]
-            print("请输入密码: ", end='', flush=True)
-            self.on_command_input = self._get_password_input
-    
-    def _get_username_input(self, username):
-        """处理用户名输入"""
-        if not username.strip():
-            print("用户名不能为空，请重新输入: ", end='', flush=True)
-            # 保持回调，等待重新输入
-            return
-            
-        self.username = username
-        print("请输入密码: ", end='', flush=True)
-        self.on_command_input = self._get_password_input
-    
-    def _get_password_input(self, password):
-        """处理密码输入"""
-        if not password.strip():
-            print("密码不能为空，请重新输入: ", end='', flush=True)
-            # 保持回调，等待重新输入
-            return
-            
-        self.password = password
-        self._perform_login()
-        self.on_command_input = None  # 清除回调
-        
-    def _perform_login(self):
-        """执行登录操作"""
-        print(f"\n正在登录账号 {self.username}...")
-        self.login_in_progress = True
-        
-        if self.network_manager.connected:
-            self.caller.remote_call("client_login", self.username, self.password)
-        else:
-            self._print_prompt("未连接到服务器，无法登录")
-    
-    def _handle_user_data_command(self, command_name, callback):
-        """处理用户数据相关命令"""
-        if not self.authenticated:
-            self._print_prompt("请先登录")
-            return
-            
-        self._print_prompt(f"正在{command_name}用户数据...")
-        callback()
-    
-    def handle_save_command(self, args=None):
-        """处理保存用户数据命令"""
-        self._handle_user_data_command("保存", 
-            lambda: self.caller.remote_call("userdata_save", json.dumps(self.user_data)))
-    
-    def handle_load_command(self, args=None):
-        """处理加载用户数据命令"""
-        self._handle_user_data_command("加载", 
-            lambda: self.caller.remote_call("userdata_load"))
-    
-    def handle_data_command(self, args=None):
-        """显示当前用户数据"""
-        if not self.authenticated:
-            self._print_prompt("请先登录")
-            return
-            
-        data_info = "\n当前用户数据:"
-        for key, value in self.user_data.items():
-            data_info += f"\n  {key}: {value}"
-        self._print_prompt(data_info)
-    
-    def handle_set_command(self, args=None):
-        """设置用户数据属性"""
-        if not self.authenticated:
-            self._print_prompt("请先登录")
-            return
-            
-        if not args or not args[0].strip() or len(args[0].split()) < 2:
-            self._print_prompt("格式错误：set <key> <value>")
-            return
-            
-        parts = args[0].split(maxsplit=1)
-        key = parts[0].strip()
-        value = parts[1].strip()
-        
-        if not key or not value:
-            self._print_prompt("键和值都不能为空")
-            return
-        
-        # 尝试将值转换为数字类型
-        try:
-            value = int(value)
-        except ValueError:
-            try:
-                value = float(value)
-            except ValueError:
-                pass  # 保持为字符串类型
-                
-        # 更新数据
-        self.user_data[key] = value
-        self._print_prompt(f"已设置 {key} = {value}")
-            
     @EXPOSED
     def login_required(self):
         """服务器要求登录"""
         try:
             self.logger.info("服务器请求登录")
-            if not self.login_in_progress:
-                self._print_prompt("服务器要求登录，使用默认凭据进行登录...")
-                self._perform_login()
+            print("[服务器] 请求登录认证")
+            self._add_test_message("服务器要求进行登录认证")
+            
+            if not self.login_in_progress and self.test_state == TestState.INIT:
+                print("使用默认凭据自动登录...")
+                # 不在初始测试流程中自动登录，遵循测试流程
         except Exception as e:
-            self.logger.error(f"处理登录请求时出错: {str(e)}")
+            self.logger.error(f"处理登录请求时错误: {str(e)}")
+            self._add_test_message(f"处理登录请求出错: {str(e)}")
     
     @EXPOSED
     def login_success(self, token):
@@ -625,7 +734,16 @@ class ClientEntity:
             if not token:
                 self.logger.warning("收到空token")
                 self.authenticated = False
-                self._print_prompt("登录异常: 服务器返回无效token")
+                print("[登录] 异常: 服务器返回无效token")
+                self._add_test_message("登录异常: 服务器返回无效token")
+                
+                # 如果是正确凭据登录测试，标记为失败
+                if self.test_state == TestState.LOGIN_CORRECT_CREDENTIALS:
+                    self._mark_test_result(TestState.LOGIN_CORRECT_CREDENTIALS, TestResult.FAILURE, "登录失败: 无效token")
+                # 如果是重新登录测试，标记为失败
+                elif self.test_state == TestState.LOGIN_AGAIN:
+                    self._mark_test_result(TestState.LOGIN_AGAIN, TestResult.FAILURE, "重新登录失败: 无效token")
+                    
                 return
                 
             self.authenticated = True
@@ -637,9 +755,19 @@ class ClientEntity:
             masked_token = token[:5] + "..." + token[-5:] if len(token) > 10 else "***"
             self.logger.info(f"登录成功，获取token: {masked_token}")
             
-            self._print_prompt(f"登录成功! 欢迎, {self.username}")
+            print(f"[登录] 成功! 用户: {self.username}, Token: {masked_token}")
+            self._add_test_message(f"登录成功，用户: {self.username}，Token: {masked_token}")
+            
+            # 如果是正确凭据登录测试，标记为成功
+            if self.test_state == TestState.LOGIN_CORRECT_CREDENTIALS:
+                self._mark_test_result(TestState.LOGIN_CORRECT_CREDENTIALS, TestResult.SUCCESS, "使用正确凭据登录成功")
+            # 如果是重新登录测试，标记为成功
+            elif self.test_state == TestState.LOGIN_AGAIN:
+                self._mark_test_result(TestState.LOGIN_AGAIN, TestResult.SUCCESS, "重连后重新登录成功")
+                
         except Exception as e:
             self.logger.error(f"处理登录成功回调时出错: {str(e)}")
+            self._add_test_message(f"处理登录成功回调出错: {str(e)}")
     
     @EXPOSED
     def kicked(self, reason):
@@ -647,16 +775,31 @@ class ClientEntity:
         self.authenticated = False
         self.token = None
         self.logger.warning(f"您的账号在其他设备登录，被迫下线: {reason}")
-        self._print_prompt(f"您已被服务器踢下线: {reason}")
+        print(f"[系统] 您已被服务器踢下线: {reason}")
+        self._add_test_message(f"被服务器踢下线: {reason}")
     
     @EXPOSED
     def server_shutdown(self, message):
         """服务器关闭的回调"""
         self.logger.warning(f"服务器关闭通知: {message}")
-        self._print_prompt(f"服务器通知: {message}\n服务器即将关闭，客户端将在5秒后退出...")
+        print(f"[系统] 服务器通知: {message}")
+        print("服务器即将关闭，客户端将在3秒后退出...")
+        self._add_test_message(f"服务器关闭通知: {message}")
         
-        # 设置定时器在5秒后关闭客户端
-        threading.Timer(5.0, self.handle_exit_command).start()
+        # 标记所有未完成的测试为跳过
+        for state in TestState:
+            if state != TestState.INIT and state != TestState.COMPLETE:
+                if self.test_results.get(state)== TestResult.PENDING:
+                    self._mark_test_result(state, TestResult.SKIPPED, "服务器关闭，测试跳过")
+        
+        # 设置定时器在3秒后关闭客户端
+        threading.Timer(3.0, self._exit_program).start()
+    
+    def _exit_program(self):
+        """关闭程序"""
+        self.logger.info("程序即将退出")
+        self.running = False
+        print("程序正在退出...")
     
     @EXPOSED
     def login_failed(self, reason):
@@ -667,19 +810,22 @@ class ClientEntity:
             self.login_in_progress = False
             
             self.logger.warning(f"登录失败: {reason}")
+            print(f"[登录] 失败: {reason}")
+            self._add_test_message(f"登录失败: {reason}")
             
-            message = f"登录失败: {reason}"
-            
-            # 如果多次尝试登录失败，给出建议
-            if self.login_attempts > 2:
-                message += "\n提示: 请检查您的用户名和密码是否正确"
-                self.login_attempts = 0  # 重置计数
-            else:
-                self.login_attempts += 1
+            # 如果是错误凭据登录测试，标记为成功(因为我们期望失败)
+            if self.test_state == TestState.LOGIN_WRONG_CREDENTIALS:
+                self._mark_test_result(TestState.LOGIN_WRONG_CREDENTIALS, TestResult.SUCCESS, "使用错误凭据登录，预期失败，测试通过")
+            # 如果是正确凭据登录测试，标记为失败
+            elif self.test_state == TestState.LOGIN_CORRECT_CREDENTIALS:
+                self._mark_test_result(TestState.LOGIN_CORRECT_CREDENTIALS, TestResult.FAILURE, f"使用正确凭据登录失败: {reason}")
+            # 如果是重新登录测试，标记为失败
+            elif self.test_state == TestState.LOGIN_AGAIN:
+                self._mark_test_result(TestState.LOGIN_AGAIN, TestResult.FAILURE, f"重连后重新登录失败: {reason}")
                 
-            self._print_prompt(message)
         except Exception as e:
             self.logger.error(f"处理登录失败回调时出错: {str(e)}")
+            self._add_test_message(f"处理登录失败回调出错: {str(e)}")
     
     @EXPOSED
     def userdata_update(self, data_json):
@@ -687,28 +833,87 @@ class ClientEntity:
         try:
             self.user_data = json.loads(data_json)
             self.logger.info("已接收用户数据")
-            self._print_prompt("已加载用户数据")
+            print(f"[数据] 已接收用户数据: {data_json[:50]}..." if len(data_json) > 50 else data_json)
+            self._add_test_message(f"成功接收用户数据: {data_json}")
+            
+            # 如果是加载用户数据测试，标记为成功
+            if self.test_state == TestState.LOAD_WITHOUT_DATA:
+                self._mark_test_result(TestState.LOAD_WITHOUT_DATA, TestResult.SUCCESS, "成功加载初始用户数据")
+            elif self.test_state == TestState.LOAD_DATA:
+                # 验证数据是否与保存的一致
+                try:
+                    loaded_data = json.loads(data_json)
+                    is_matching = True
+                    
+                    # 检查保存的关键字段
+                    for key in self.test_sample_data:
+                        if key not in loaded_data or loaded_data[key] != self.test_sample_data[key]:
+                            is_matching = False
+                            break
+                    
+                    if is_matching:
+                        self._mark_test_result(TestState.LOAD_DATA, TestResult.SUCCESS, "成功加载之前保存的数据，数据匹配")
+                    else:
+                        self._mark_test_result(TestState.LOAD_DATA, TestResult.FAILURE, "加载的数据与之前保存的不匹配")
+                except:
+                    self._mark_test_result(TestState.LOAD_DATA, TestResult.ERROR, "验证加载数据时出错")
         except Exception as e:
             self.logger.error(f"解析用户数据时出错: {str(e)}")
-            self._print_prompt(f"加载用户数据时出错: {str(e)}")
+            print(f"[数据] 加载用户数据时出错: {str(e)}")
+            self._add_test_message(f"解析用户数据出错: {str(e)}")
+            
+            # 标记测试失败
+            if self.test_state == TestState.LOAD_WITHOUT_DATA:
+                self._mark_test_result(TestState.LOAD_WITHOUT_DATA, TestResult.ERROR, f"解析用户数据出错: {str(e)}")
+            elif self.test_state == TestState.LOAD_DATA:
+                self._mark_test_result(TestState.LOAD_DATA, TestResult.ERROR, f"解析用户数据出错: {str(e)}")
     
     @EXPOSED
     def save_success(self):
         """保存数据成功回调"""
         self.logger.info("数据保存成功")
-        self._print_prompt("数据保存成功")
+        print("[数据] 保存成功")
+        self._add_test_message("数据保存成功")
+        
+        # 如果是保存数据测试，标记为成功
+        if self.test_state == TestState.SAVE_DATA:
+            self._mark_test_result(TestState.SAVE_DATA, TestResult.SUCCESS, "成功保存测试数据")
     
     @EXPOSED
     def data_error(self, message):
         """数据操作错误回调"""
         self.logger.warning(f"数据操作错误: {message}")
-        self._print_prompt(f"数据操作错误: {message}")
+        print(f"[数据] 错误: {message}")
+        self._add_test_message(f"数据操作错误: {message}")
+        
+        # 根据当前测试状态标记测试结果
+        if self.test_state == TestState.SAVE_WITHOUT_LOGIN:
+            self._mark_test_result(TestState.SAVE_WITHOUT_LOGIN, TestResult.SUCCESS, "未登录状态下尝试保存数据，服务器正确拒绝")
+        elif self.test_state == TestState.LOAD_WITHOUT_LOGIN:
+            self._mark_test_result(TestState.LOAD_WITHOUT_LOGIN, TestResult.SUCCESS, "未登录状态下尝试加载数据，服务器正确拒绝")
+        elif self.test_state == TestState.LOAD_AFTER_FAILED_LOGIN:
+            self._mark_test_result(TestState.LOAD_AFTER_FAILED_LOGIN, TestResult.SUCCESS, "登录失败后尝试加载数据，服务器正确拒绝")
+        elif self.test_state == TestState.LOAD_WITHOUT_LOGIN_2:
+            self._mark_test_result(TestState.LOAD_WITHOUT_LOGIN_2, TestResult.SUCCESS, "重连后未登录状态下尝试加载数据，服务器正确拒绝")
+        elif self.test_state == TestState.SAVE_DATA:
+            self._mark_test_result(TestState.SAVE_DATA, TestResult.FAILURE, f"保存数据失败: {message}")
     
     @EXPOSED
     def auth_error(self, message):
         """认证错误回调"""
         self.logger.warning(f"认证错误: {message}")
-        self._print_prompt(f"认证错误: {message}")
+        print(f"[认证] 错误: {message}")
+        self._add_test_message(f"认证错误: {message}")
+        
+        # 根据当前测试状态标记测试结果
+        if self.test_state == TestState.SAVE_WITHOUT_LOGIN:
+            self._mark_test_result(TestState.SAVE_WITHOUT_LOGIN, TestResult.SUCCESS, "未登录状态下尝试保存数据，服务器正确拒绝未登录状态下尝试保存数据，服务器正确拒绝")
+        elif self.test_state == TestState.LOAD_WITHOUT_LOGIN:
+            self._mark_test_result(TestState.LOAD_WITHOUT_LOGIN, TestResult.SUCCESS, "未登录状态下尝试加载数据，服务器正确拒绝")
+        elif self.test_state == TestState.LOAD_AFTER_FAILED_LOGIN:
+            self._mark_test_result(TestState.LOAD_AFTER_FAILED_LOGIN, TestResult.SUCCESS, "登录失败后尝试加载数据，服务器正确拒绝")
+        elif self.test_state == TestState.LOAD_WITHOUT_LOGIN_2:
+            self._mark_test_result(TestState.LOAD_WITHOUT_LOGIN_2, TestResult.SUCCESS, "重连后未登录状态下尝试加载数据，服务器正确拒绝")
             
     @EXPOSED
     def recv_msg_from_server(self, stat, msg):
@@ -719,31 +924,18 @@ class ClientEntity:
         # 更新网络延迟信息
         self.network_manager.update_latency(time.time())
         
-        self._print_prompt(f"服务器消息: {msg}")
+        print(f"[服务器消息] {msg}")
     
     @EXPOSED
     def exit_confirmed(self):
         """服务器确认退出的回调函数"""
         self.logger.info('服务器确认客户端退出')
-        self.running = False
-
-def input_thread_function(client_entity, logger):
-    """用于处理用户输入的线程函数"""
-    logger.debug("输入处理线程启动")
-    print("> ", end='', flush=True)
-    
-    while client_entity.running:
-        try:
-            cmd = input()
-            # 将命令发送到主线程处理
-            client_entity.process_command(cmd)
-        except EOFError:
-            logger.info("输入流已关闭")
-            break
-        except Exception as e:
-            logger.error(f"输入处理错误: {e}")
-            
-    logger.debug("输入处理线程结束")
+        print("[系统] 服务器已确认退出请求")
+        self._add_test_message("服务器确认退出请求")
+        
+        # 如果是登出测试，标记为成功
+        if self.test_state == TestState.LOGOUT:
+            self._mark_test_result(TestState.LOGOUT, TestResult.SUCCESS, "成功退出登录，使token失效")
 
 def main():
     # 解析命令行参数
@@ -755,7 +947,6 @@ def main():
     parser.add_argument('--no-reconnect', action='store_true', help='禁用自动重连')
     args = parser.parse_args()
     
-    # 设置日```python
     # 设置日志
     logger = logger_instance.get_logger('SampleClient')
     log_file = logger_instance._log_files.get('SampleClient', '')
@@ -800,17 +991,6 @@ def main():
                 logger.warning(f"无法注册信号处理器: {str(e)}")
         
         setup_signal_handlers()
-        
-        # 显示帮助信息
-        client_entity.handle_help_command()
-        
-        # 创建并启动输入处理线程
-        input_thread = threading.Thread(
-            target=input_thread_function, 
-            args=(client_entity, logger),
-            daemon=True  # 设置为守护线程，这样主线程退出时它会自动结束
-        )
-        input_thread.start()
         
         # 主循环 - 运行定时器调度
         while client_entity.running:
