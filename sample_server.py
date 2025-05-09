@@ -97,6 +97,12 @@ class GameServerEntity:
         if exception:
             self.logger.error(traceback.format_exc())
     
+        # 避免重复发送相同错误消息到客户端
+        if hasattr(self, '_last_error_msg') and self._last_error_msg == error_msg:
+            return
+        
+        self._last_error_msg = error_msg
+    
     def _request_client_removal(self):
         """请求服务器移除此客户端"""
         if hasattr(self, 'server') and self.server and hasattr(self, 'netstream') and self.netstream:
@@ -628,21 +634,26 @@ class MyGameServer(SimpleServer):
         """更新和记录性能统计信息"""
         self.tick_count += 1
         current_time = time.time()
-        
+    
         # 每10秒记录一次详细的统计信息
         if current_time - self.last_stats_time >= 10.0:
             elapsed = current_time - self.last_stats_time
             self.last_stats_time = current_time
-            
+        
             # 计算网络统计
             bytes_recv_rate = self.network_stats['bytes_received'] / elapsed
             bytes_sent_rate = self.network_stats['bytes_sent'] / elapsed
             msgs_recv_rate = self.network_stats['msgs_received'] / elapsed
             msgs_sent_rate = self.network_stats['msgs_sent'] / elapsed
-            
-            self.logger.info(f"服务器运行状态: {len(self.clients)}个客户端, "
+        
+            # 使用debug级别记录详细统计，减少日志噪音
+            self.logger.debug(f"服务器运行状态: {len(self.clients)}个客户端, "
                              f"接收速率: {bytes_recv_rate:.2f}B/s ({msgs_recv_rate:.2f}条/s), "
                              f"发送速率: {bytes_sent_rate:.2f}B/s ({msgs_sent_rate:.2f}条/s)")
+        
+            # 只在有实际客户端连接时使用info级别记录
+            if len(self.clients) > 0:
+                self.logger.info(f"服务器运行中: {len(self.clients)}个客户端连接")
             
             # 重置统计数据
             self.network_stats = {
