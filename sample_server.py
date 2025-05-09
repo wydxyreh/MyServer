@@ -5,9 +5,10 @@ import argparse
 import gc
 import weakref
 import json
-import threading
 import signal
 import traceback
+import hashlib
+import random
 
 # 添加当前目录到Python路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -452,33 +453,32 @@ class MyGameServer(SimpleServer):
             
     def on_client_data(self, client_id, data):
         """处理来自客户端的数据"""
-        if client_id in self.clients:
-            try:
-                client_entity = self.clients[client_id]
+        if client_id not in self.clients:
+            return
+            
+        try:
+            client_entity = self.clients[client_id]
+            
+            # 安全检查：未认证客户端限速和数据包大小限制
+            if not client_entity.authenticated and time.time() - client_entity.last_activity_time < 0.05:
+                self.logger.warning(f"客户端 {client_id} 数据请求频率过高，可能是攻击行为")
+                return
+            
+            # 数据包大小限制(1MB)
+            if len(data) > 1024 * 1024:
+                self.logger.warning(f"客户端 {client_id} 发送超大数据包，可能是攻击行为")
+                return
                 
-                # 对还未认证的客户端强制限速
-                if not client_entity.authenticated:
-                    if time.time() - client_entity.last_activity_time < 0.05:
-                        self.logger.warning(f"客户端 {client_id} 数据请求频率过高，可能是攻击行为")
-                        return  # 直接丢弃该请求
-                
-                client_entity.update_activity_time()
-                
-                # 记录数据统计
-                data_size = len(data)
-                self.network_stats['bytes_received'] += data_size
-                self.network_stats['msgs_received'] += 1
-                
-                # 限制单个客户端的数据大小
-                if data_size > 1024 * 1024:  # 1MB大小限制
-                    self.logger.warning(f"客户端 {client_id} 发送超大数据包，可能是攻击行为")
-                    return
-                
-                # 解析RPC调用
-                if client_entity.caller:
-                    client_entity.caller.parse_rpc(data)
-            except Exception as e:
-                self._log_error(f"处理客户端 {client_id} 数据时出错", e)
+            # 更新客户端活动时间并记录统计
+            client_entity.update_activity_time()
+            self.network_stats['bytes_received'] += len(data)
+            self.network_stats['msgs_received'] += 1
+            
+            # 解析RPC调用
+            if client_entity.caller:
+                client_entity.caller.parse_rpc(data)
+        except Exception as e:
+            self._log_error(f"处理客户端 {client_id} 数据时出错", e)
     
     def on_high_frequency_tick(self):
         """1ms高频定时器回调 - 只处理网络IO"""
@@ -487,26 +487,19 @@ class MyGameServer(SimpleServer):
         # 处理网络事件
         self.host.process()
         
-        # 处理消息队列
-        events_count = 0
-        while events_count < 10:  # 限制每次处理的事件数量
+        # 每次最多处理10个网络事件以避免阻塞
+        for _ in range(10):
             event_type, hid, data = self.host.read()
             if event_type == -1:
                 break
                 
-            # 处理连接事件
+            # 根据事件类型分发处理
             if event_type == conf.NET_CONNECTION_NEW and self.host.onConnected:
                 self.host.onConnected(hid, self.host.clients[hid & conf.MAX_HOST_CLIENTS_INDEX])
-                
-            # 处理断开连接事件
             elif event_type == conf.NET_CONNECTION_LEAVE and self.host.onDisconnected:
                 self.host.onDisconnected(hid)
-                
-            # 处理数据事件
             elif event_type == conf.NET_CONNECTION_DATA and self.host.onData:
                 self.host.onData(hid, data)
-            
-            events_count += 1
     
     def on_medium_frequency_tick(self):
         """10ms中频定时器回调 - 处理消息和实体状态"""
@@ -561,42 +554,31 @@ class MyGameServer(SimpleServer):
                 del self.clients[client_id]
     
     def _generate_token(self, username, client_id=None):
-        """为用户生成唯一的令牌
-        
-        Args:
-            username (str): 用户名
-            client_id (int, optional): 客户端ID，用于区分不同的连接
-            
-        Returns:
-            str: 生成的token字符串，生成失败则返回None
-        """
-        import hashlib
-        import random
-        import os
-        
+        """为用户生成唯一的令牌"""
         try:
-            # 参数验证
             if not username or not isinstance(username, str):
                 self.logger.error("生成令牌失败: 无效的用户名")
                 return None
             
-            # 增强熵源，提高安全性
-            random_part = str(random.randint(100000, 999999))
-            timestamp = str(time.time())
-            entropy = os.urandom(16).hex()  # 增加熵值大小
-            client_part = str(client_id if client_id is not None else random.randint(0, 1000000))
-            token_base = f"{username}:{random_part}:{timestamp}:{entropy}:{client_part}"
+            # 组合安全令牌基础
+            token_base = (
+                f"{username}:"
+                f"{random.randint(100000, 999999)}:"
+                f"{time.time()}:"
+                f"{os.urandom(16).hex()}:"
+                f"{client_id if client_id is not None else random.randint(0, 1000000)}"
+            )
             
-            # 生成令牌
+            # 生成并存储令牌
             token = hashlib.sha256(token_base.encode()).hexdigest()
             expiry_time = time.time() + self.token_validity
             
-            # 使旧令牌失效 (如果用户已登录在其他地方)
+            # 使同一用户的旧令牌失效
             self._invalidate_tokens_for_user(username)
             
-            # 存储令牌在内存中
+            # 存储新令牌
             self.active_tokens[token] = (username, expiry_time, client_id)
-            self.logger.debug(f"生成新token: 用户={username}, 客户端ID={client_id}, 过期时间={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(expiry_time))}")
+            self.logger.debug(f"生成新token: 用户={username}, 客户端ID={client_id}")
             
             return token
         except Exception as e:
@@ -617,35 +599,22 @@ class MyGameServer(SimpleServer):
             self.logger.info(f"已使用户 {username} 的 {len(tokens_to_remove)} 个旧令牌失效")
     
     def validate_token(self, token, client_id=None):
-        """验证令牌的有效性
-        
-        Args:
-            token (str): 要验证的token
-            client_id (int, optional): 客户端ID，如果提供则进行额外验证
-            
-        Returns:
-            str: 如果token有效，返回对应的用户名；否则返回None
-        """
-        if not token or not isinstance(token, str):
-            self.logger.warning("验证令牌失败: 无效的令牌格式")
-            return None
-            
-        if token not in self.active_tokens:
-            self.logger.debug("验证令牌失败: 令牌不存在")
+        """验证令牌的有效性"""
+        # 基本验证
+        if not token or not isinstance(token, str) or token not in self.active_tokens:
             return None
             
         username, expiry_time, stored_client_id = self.active_tokens[token]
         
-        # 检查令牌是否过期
-        if time.time() >expiry_time:
-            # 令牌已过期，从活动令牌中移除
+        # 过期检查
+        if time.time() > expiry_time:
             self.logger.info(f"用户 {username} 的令牌已过期")
             del self.active_tokens[token]
             return None
         
-        # 如果提供了client_id，确保匹配
+        # 客户端ID匹配检查
         if client_id is not None and stored_client_id is not None and client_id != stored_client_id:
-            self.logger.warning(f"令牌验证失败: 客户端ID不匹配 (预期: {stored_client_id}, 实际: {client_id})")
+            self.logger.warning(f"令牌验证失败: 客户端ID不匹配")
             return None
             
         return username
@@ -668,32 +637,26 @@ class MyGameServer(SimpleServer):
         self.tick_count += 1
         current_time = time.time()
     
-        # 每10秒记录一次详细的统计信息
+        # 每10秒记录一次统计信息
         if current_time - self.last_stats_time >= 10.0:
             elapsed = current_time - self.last_stats_time
             self.last_stats_time = current_time
             
-            # 计算网络统计
-            bytes_recv_rate = self.network_stats['bytes_received'] / elapsed
-            bytes_sent_rate = self.network_stats['bytes_sent'] / elapsed
-            msgs_recv_rate = self.network_stats['msgs_received'] / elapsed
-            msgs_sent_rate = self.network_stats['msgs_sent'] / elapsed
-            
-            # 记录日志
-            self.logger.debug(f"服务器运行状态: {len(self.clients)}个客户端, "
-                            f"接收速率: {bytes_recv_rate:.2f}B/s ({msgs_recv_rate:.2f}条/s), "
-                            f"发送速率: {bytes_sent_rate:.2f}B/s ({msgs_sent_rate:.2f}条/s)")
-            
-            if len(self.clients) > 0:
-                self.logger.info(f"服务器运行中: {len(self.clients)}个客户端连接")
+            # 计算并记录网络速率
+            if elapsed > 0:
+                stats = {k: v/elapsed for k, v in {
+                    '接收速率': self.network_stats['bytes_received'],
+                    '发送速率': self.network_stats['bytes_sent'],
+                    '接收消息数': self.network_stats['msgs_received'],
+                    '发送消息数': self.network_stats['msgs_sent']
+                }.items()}
+                
+                self.logger.debug(f"服务器状态: {len(self.clients)}个客户端, "
+                                f"接收: {stats['接收速率']:.2f}B/s ({stats['接收消息数']:.2f}条/s), "
+                                f"发送: {stats['发送速率']:.2f}B/s ({stats['发送消息数']:.2f}条/s)")
             
             # 重置统计数据
-            self.network_stats = {
-                'bytes_received': 0,
-                'bytes_sent': 0,
-                'msgs_received': 0,
-                'msgs_sent': 0
-            }
+            self.network_stats = {k: 0 for k in self.network_stats}
     
     def _check_inactive_clients(self):
         """检查并移除不活跃的客户端"""
@@ -735,22 +698,20 @@ if __name__ == "__main__":
     parser.add_argument('--bind', default='0.0.0.0', help='绑定地址 (默认: 0.0.0.0)')
     args = parser.parse_args()
     
-    # 设置日志记录器并初始化服务器
+    # 初始化
     logger = logger_instance.get_logger('Main')
     server = None
     should_exit = False
     
     try:
-        # 注册信号处理器
-        if hasattr(signal, 'SIGINT'):
-            signal.signal(signal.SIGINT, signal_handler)
-        if hasattr(signal, 'SIGTERM'):
-            signal.signal(signal.SIGTERM, signal_handler)
+        # 注册信号处理
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            if hasattr(signal, sig.name):
+                signal.signal(sig, signal_handler)
         
-        # 创建服务器实例并启动
+        # 启动服务器
         server = MyGameServer()
-        result = server.host.startup(args.port)
-        if result != 0:
+        if server.host.startup(args.port) != 0:
             logger.error(f"服务器启动失败，端口 {args.port} 可能已被占用")
             sys.exit(1)
         
@@ -759,21 +720,19 @@ if __name__ == "__main__":
         # 主循环
         while not should_exit:
             server.tick()
-            time.sleep(0.001)  # 微小延迟减轻CPU负担
+            time.sleep(0.001)  # 减轻CPU负担
                     
     except KeyboardInterrupt:
         logger.info("接收到键盘中断，服务器正在关闭...")
     except Exception as e:
         logger.error(f"服务器运行时发生意外错误: {str(e)}")
         logger.error(traceback.format_exc())
+        
     finally:
         # 优雅关闭
         if server:
             logger.info("正在关闭服务器...")
-            # 通知所有客户端服务器将关闭
             server.shutdown_all_clients()
-            
-            # 关闭网络服务
             server.host.shutdown()
             
             # 清理资源
@@ -785,8 +744,6 @@ if __name__ == "__main__":
                 logger.error(traceback.format_exc())
             
             # 最终清理
-            cleanup_logger = logger_instance.get_logger('Cleanup')
-            cleanup_logger.info("正在清理全局资源...")
             gc.collect()
             
         logger.info("服务器已完全关闭。")

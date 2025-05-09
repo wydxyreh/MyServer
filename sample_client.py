@@ -8,16 +8,13 @@ import threading
 import json
 import traceback
 import signal
-import datetime
-from enum import Enum, auto
-
-# 添加当前目录到Python路径
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
 from server.common import conf
 from server.network.netStream import NetStream, RpcProxy
 from server.common.logger import logger_instance
 from server.common.timer import TimerManager
+
+# 添加当前目录到Python路径
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 def EXPOSED(func):
     func.__exposed__ = True
@@ -49,10 +46,6 @@ class ClientNetworkManager:
         self.latency_samples = []
         self.last_ping_time = 0
         
-        # 用于自动测试
-        self.last_connection_attempt = 0
-        self.connection_retry_interval = 1.0  # 重试间隔
-        
     def connect(self):
         """连接到服务器"""
         if self.connection_state == "connecting":
@@ -62,39 +55,29 @@ class ClientNetworkManager:
             self.connection_state = "connecting"
             self.logger.info(f"尝试连接服务器: {self.host}:{self.port}")
             
-            # 先尝试DNS解析
+            # 尝试DNS解析和连接
             try:
                 socket.getaddrinfo(self.host, self.port)
-            except socket.gaierror as e:
-                self.logger.error(f"DNS解析失败: {str(e)}")
-                self.connection_state = "disconnected"
-                return False
-                
-            try:
                 self.socket.connect(self.host, self.port)
-            except (socket.error, OSError) as e:
+            except (socket.gaierror, socket.error, OSError) as e:
                 self.logger.error(f"连接失败: {str(e)}")
                 self.connection_state = "disconnected"
                 return False
                 
             self.socket.nodelay(1)  # 启用TCP_NODELAY
             self.setup_time = time.time()
-            self.last_heartbeat_time = self.setup_time
-            self.last_ping_time = self.setup_time
+            self.last_heartbeat_time = self.last_ping_time = self.setup_time
             
-            # 等待连接建立，使用渐进式超时机制
+            # 等待连接建立
             connection_timeout = time.time() + 5.0  # 5秒连接超时
-            
             while time.time() < connection_timeout:
                 self.socket.process()
                 if self.socket.status() == conf.NET_STATE_ESTABLISHED:
                     self._on_connection_established()
                     return True
-                    
-                time.sleep(0.01)  # 减少等待时间粒度
+                time.sleep(0.01)
             
-            self.logger.error(f"连接超时")
-            
+            self.logger.error("连接超时")
             self._close_socket()
             return False
             
@@ -128,32 +111,26 @@ class ClientNetworkManager:
             
         current_time = time.time()
         
-        # 计算指数退避时间 - 随着重试次数增加，等待时间呈指数增长
+        # 计算指数退避时间
         backoff_interval = min(30, self.reconnect_interval * (2 ** (self.reconnect_attempts - 1)))
-        
         if current_time - self.last_reconnect_time < backoff_interval:
             return False
             
         self.last_reconnect_time = current_time
         self.reconnect_attempts += 1
-        
         self.logger.info(f"尝试重连 (第 {self.reconnect_attempts} 次)")
         
-        # 确保旧连接已关闭
-        if self.socket:
-            self._close_socket()
-            
-        # 创建新连接
+        # 确保旧连接已关闭并创建新连接
+        self._close_socket()
         self.socket = NetStream()
         success = self.connect()
         
-        # 重连成功时触发信号，以便客户端可以重置RPC代理
-        if success:
-            if hasattr(self, 'on_reconnected') and callable(self.on_reconnected):
-                try:
-                    self.on_reconnected(self.socket)
-                except Exception as e:
-                    self.logger.error(f"执行重连回调时出错: {str(e)}")
+        # 重连成功时触发回调
+        if success and hasattr(self, 'on_reconnected') and callable(self.on_reconnected):
+            try:
+                self.on_reconnected(self.socket)
+            except Exception as e:
+                self.logger.error(f"执行重连回调时出错: {str(e)}")
         
         return success
     
@@ -166,7 +143,6 @@ class ClientNetworkManager:
             return None
             
         try:
-            # 处理网络事件
             self.socket.process()
             
             # 检查连接状态
@@ -179,10 +155,8 @@ class ClientNetworkManager:
             # 发送心跳包
             self.send_heartbeat()
             
-            # 处理发送缓冲区
+            # 处理发送缓冲区和接收数据
             self._process_send_buffer()
-            
-            # 接收数据
             data = self.socket.recv()
             if data:
                 self.bytes_received += len(data)
@@ -214,7 +188,6 @@ class ClientNetworkManager:
                 self.bytes_sent += len(data)
         except Exception as e:
             self.logger.error(f"发送数据出错: {str(e)}")
-            # 如果发送失败，将数据重新放入缓冲区
             if 'data' in locals():
                 self.send_buffer.insert(0, data)
     
@@ -225,13 +198,8 @@ class ClientNetworkManager:
             self.send_buffer.append(data)
             return False
             
-        try:
-            # 将数据加入发送缓冲区
-            self.send_buffer.append(data)
-            return True
-        except Exception as e:
-            self.logger.error(f"加入发送缓冲区时出错: {str(e)}")
-            return False
+        self.send_buffer.append(data)
+        return True
     
     def send_heartbeat(self):
         """发送心跳包以保持连接活跃"""
@@ -239,8 +207,6 @@ class ClientNetworkManager:
         if cur_time - self.last_heartbeat_time >= self.heartbeat_interval:
             self.last_heartbeat_time = cur_time
             self.heartbeat_count += 1
-            
-            # 记录发送时间用于延迟计算
             self.last_ping_time = cur_time
             return True
         return False
@@ -254,8 +220,8 @@ class ClientNetworkManager:
             if len(self.latency_samples) > 10:
                 self.latency_samples.pop(0)
             
-            # 使用debug级别记录平均延迟，减少日志量
-            if self.heartbeat_count % 10 == 0:  # 每10次心跳记录一次
+            # 每10次心跳记录一次平均延迟
+            if self.heartbeat_count % 10 == 0:
                 avg_latency = sum(self.latency_samples) / len(self.latency_samples) if self.latency_samples else 0
                 self.logger.debug(f"网络延迟: {avg_latency:.2f}ms")
     
@@ -302,11 +268,8 @@ class ClientEntity:
         
     def _setup_timers(self):
         """设置定时器"""
-        # 10ms定时器 - 处理网络
-        TimerManager.addRepeatTimer(0.01, self.process_network)
-        
-        # 100ms定时器 - 处理消息
-        TimerManager.addRepeatTimer(0.1, self.process_messages)
+        TimerManager.addRepeatTimer(0.01, self.process_network)  # 10ms定时器 - 处理网络
+        TimerManager.addRepeatTimer(0.1, self.process_messages)  # 100ms定时器 - 处理消息
     
     def _on_reconnect(self, new_socket):
         """处理重连事件，重置RPC代理"""
@@ -320,7 +283,6 @@ class ClientEntity:
             except Exception as e:
                 self.logger.error(f"关闭旧RPC代理时出错: {str(e)}")
                 
-        # 创建新的RPC代理
         self.caller = RpcProxy(self, self.socket)
         self.logger.info("RPC代理已重置")
         
@@ -333,9 +295,7 @@ class ClientEntity:
         self.logger.info("客户端实体被销毁")
         if self.caller:
             self.caller.close()
-        self.caller = None
-        self.socket = None
-        self.network_manager = None
+        self.caller = self.socket = self.network_manager = None
         
     def process_network(self):
         """处理网络事件"""
@@ -431,16 +391,11 @@ class ClientEntity:
     @EXPOSED
     def login_failed(self, reason):
         """登录失败回调"""
-        try:
-            self.authenticated = False
-            self.token = None
-            self.login_in_progress = False
-            
-            self.logger.warning(f"登录失败: {reason}")
-            print(f"[登录] 失败: {reason}")
-                
-        except Exception as e:
-            self.logger.error(f"处理登录失败回调时出错: {str(e)}")
+        self.authenticated = False
+        self.token = None
+        self.login_in_progress = False
+        self.logger.warning(f"登录失败: {reason}")
+        print(f"[登录] 失败: {reason}")
     
     @EXPOSED
     def userdata_update(self, data_json):
@@ -478,10 +433,7 @@ class ClientEntity:
         """接收服务器消息的回调函数"""
         self.logger.info(f'客户端收到服务器消息: stat={stat}, msg={msg}')
         self.stat = stat
-        
-        # 更新网络延迟信息
         self.network_manager.update_latency(time.time())
-        
         print(f"[服务器消息] {msg}")
     
     @EXPOSED
@@ -533,10 +485,9 @@ def main():
         if args.password:
             client_entity.password = args.password
             
-        # 注册信号处理函数 - Windows和Unix兼容处理
+        # 注册信号处理函数
         def setup_signal_handlers():
             try:
-                # 注册SIGINT处理器 (Ctrl+C)
                 if hasattr(signal, 'SIGINT'):
                     def signal_handler(signum, frame):
                         signal_name = "SIGINT" if signum == signal.SIGINT else f"Signal {signum}"
@@ -553,19 +504,16 @@ def main():
         
         # 主循环 - 运行定时器调度
         while client_entity.running:
-            try:
-                # 运行定时器调度器
-                TimerManager.scheduler()
-                time.sleep(0.001)  # 微小的延迟以减轻CPU负担
-            except KeyboardInterrupt:
-                logger.info("用户中断，客户端退出")
-                break
+            TimerManager.scheduler()
+            time.sleep(0.001)  # 微小的延迟以减轻CPU负担
         
         # 清理资源
         client_entity.destroy()
         network_manager.close()
         logger.info("客户端正常退出")
         
+    except KeyboardInterrupt:
+        logger.info("用户中断，客户端退出")
     except Exception as e:
         logger.error(f"发生错误: {str(e)}")
         logger.error(traceback.format_exc())
