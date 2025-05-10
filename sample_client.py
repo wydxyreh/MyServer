@@ -319,6 +319,10 @@ class ClientEntity:
         
         # 如果连接断开，等待重连由network_manager内部逻辑处理
         if not self.network_manager.connected:
+            # 连接断开时清除token，确保下次使用账密登录
+            if self.token:
+                self.logger.info("连接断开，清除token")
+                self.token = None
             return
             
         # 处理接收到的数据
@@ -446,6 +450,7 @@ class ClientEntity:
     def forced_logout(self, reason):
         """被强制登出的回调"""
         self.authenticated = False
+        self.token = None  # 清除token
         self.logger.warning(f"您被强制登出: {reason}")
         print(f"[系统] 您被强制登出: {reason}")
         
@@ -455,9 +460,12 @@ class ClientEntity:
             try:
                 data_json = json.dumps(self.user_data)
                 self.caller.remote_call("userdata_save", data_json)
+                self.logger.info("被强制登出时已发送数据保存请求")
             except Exception as e:
                 self.logger.error(f"在被强制登出时保存数据失败: {str(e)}")
                 print(f"[数据] 保存失败: {str(e)}")
+                # 即使保存失败也需要断开连接
+                self.disconnect(True)  # 禁用重连
     
     @EXPOSED
     def server_shutdown(self, message):
@@ -503,6 +511,12 @@ class ClientEntity:
         """保存数据成功回调"""
         self.logger.info("数据保存成功")
         print("[数据] 保存成功")
+        
+        # 如果是被强制登出状态，则在数据保存成功后断开连接
+        if not self.authenticated and hasattr(self, 'token') and self.token is None:
+            self.logger.info("强制登出状态下数据保存成功，现在断开连接")
+            print("[系统] 您的数据已保存，正在断开连接...")
+            self.disconnect(True)  # 禁用重连
         
     def save_user_data(self, data_json):
         """向服务器保存用户数据

@@ -250,10 +250,15 @@ class GameServerEntity:
                 if not is_token_login:
                     # 先通知新客户端正在处理旧连接
                     self._send_client_response("process_existing_session", "正在处理旧连接，请稍候...")
+                    
                     # 通知旧客户端被登出并保存数据
                     self._handle_existing_login(existing_client)
-                    # 等待旧客户端处理完成
-                    # 实际情况下会有一定延迟，这里简化处理
+                    
+                    # 由于我们改为异步处理旧客户端断开连接，这里不立即完成新客户端登录
+                    # 设置标记，表示正在等待旧客户端断开
+                    self.server.pending_logins[username] = (self, token)
+                    self.logger.info(f"等待用户 {username} 的旧会话处理完成")
+                    return
                 else:
                     # 如果是使用token登录，token应该已经与客户端ID绑定，不应该出现这种情况
                     # 除非是服务端缓存不一致，这里按照token无效处理
@@ -291,15 +296,13 @@ class GameServerEntity:
             # 要求旧客户端先保存数据
             existing_client.save_data_before_logout = True
             
-            # 等待旧客户端处理（实际应用中可能需要一个更复杂的机制来确保处理完成）
-            # 这里简单等待一段时间
-            import time
-            time.sleep(0.5)
+            # 标记客户端需要断开连接，但不立即断开
+            # 客户端会在数据保存完成后自行调用 _request_client_removal
+            # 新客户端的登录会在 process_messages 中处理
         except Exception as e:
             self.logger.error(f"通知旧客户端时出错: {str(e)}")
-        
-        # 强制断开旧连接
-        existing_client._request_client_removal()
+            # 如果通知失败，强制断开旧连接
+            existing_client._request_client_removal()
     
     def _load_user_data(self, username):
         """加载用户数据"""
@@ -459,6 +462,9 @@ class MyGameServer(SimpleServer):
         # Token管理
         self.active_tokens = {}  # {token: (username, expiry_time, client_id)}
         self.token_validity = 7200  # token有效期(秒)
+        
+        # 等待登录完成的客户端 {username: (client_entity, token)}
+        self.pending_logins = {}
         
         # 性能监控
         self.tick_count = 0
@@ -647,6 +653,7 @@ class MyGameServer(SimpleServer):
             
         try:
             client = self.clients[client_id]
+            username = client.username if client.authenticated else None
             
             # 如果已认证，从用户名索引中移除
             if client.authenticated and client.username in self.clients_by_username:
@@ -656,10 +663,40 @@ class MyGameServer(SimpleServer):
             # 销毁客户端实体
             client.destroy()
             del self.clients[client_id]
+            
+            # 检查是否有待处理的登录请求，如果有则完成登录
+            if username and username in self.pending_logins:
+                new_client, token = self.pending_logins.pop(username)
+                if new_client and new_client in self.clients.values():
+                    self.logger.info(f"旧客户端已断开，现在完成用户 {username} 的新登录")
+                    # 异步完成登录，避免递归调用
+                    import threading
+                    threading.Timer(0.1, lambda: self._complete_pending_login(new_client, username, token)).start()
         except Exception as e:
             self._log_error(f"删除客户端 {client_id} 时出错", e)
             if client_id in self.clients:
                 del self.clients[client_id]
+                
+    def _complete_pending_login(self, client, username, token):
+        """完成待处理的登录请求"""
+        try:
+            # 确保客户端仍然有效
+            if client and client in self.clients.values():
+                client.authenticated = True
+                client.username = username
+                client.token = token
+                self.logger.info(f"客户端 {client.id} (IP: {client.ip_address}) 登录成功: {username}")
+                
+                # 发送登录成功消息
+                client._send_client_response("login_success", token)
+                
+                # 注册到用户名索引
+                self.register_authenticated_client(username, client)
+                
+                # 加载用户数据
+                client._load_user_data(username)
+        except Exception as e:
+            self._log_error(f"完成待处理登录时出错: {str(e)}")
     
     def _generate_token(self, username, client_id=None):
         """为用户生成唯一的令牌"""
