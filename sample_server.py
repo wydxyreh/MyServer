@@ -26,7 +26,7 @@ def EXPOSED(func):
     return func
 
 def log_function(func):
-    """装饰器，记录函数调用的名称、参数和执行完成情况"""
+    """装饰器，记录函数调用的名称、参数和执行完成情况，包括详细的参数内容和返回值"""
     def wrapper(*args, **kwargs):
         instance = args[0] if args else None
         # 使用类实例的logger或全局logger
@@ -41,16 +41,35 @@ def log_function(func):
         caller_info = ""
         if hasattr(instance, 'id'):
             caller_info += f"客户端ID={instance.id} "
+        if hasattr(instance, 'ip_address') and instance.ip_address:
+            caller_info += f"IP={instance.ip_address} "
         if hasattr(instance, 'username') and instance.username:
             caller_info += f"用户={instance.username} "
         
-        logger.info(f"{caller_info}调用函数 {func.__name__}({signature})")
+        # 获取调用位置信息
+        import inspect
+        frame = inspect.currentframe().f_back
+        filename = frame.f_code.co_filename
+        line_number = frame.f_lineno
+        caller_location = f"{filename}:{line_number}"
+        
+        logger.info(f"{caller_info}调用函数 {func.__name__}({signature}) 位置:{caller_location}")
         
         # 执行函数
+        start_time = time.time()
         result = func(*args, **kwargs)
+        execution_time = (time.time() - start_time) * 1000  # 毫秒
+        
+        # 记录返回值（如果不是None且不是特别大）
+        result_info = ""
+        if result is not None:
+            result_str = repr(result)
+            if len(result_str) > 500:  # 限制返回值日志长度
+                result_str = result_str[:500] + "..."
+            result_info = f", 返回值: {result_str}"
         
         # 记录函数执行完成
-        logger.info(f"{caller_info}函数 {func.__name__} 执行完成")
+        logger.info(f"{caller_info}函数 {func.__name__} 执行完成，耗时: {execution_time:.2f}ms{result_info}")
         
         return result
     return wrapper
