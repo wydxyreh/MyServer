@@ -329,18 +329,6 @@ class ClientEntity:
         self.pending_messages = []
     
     @EXPOSED
-    def login_required(self):
-        """服务器要求登录"""
-        try:
-            self.logger.info("服务器请求登录")
-            print("[服务器] 请求登录认证")
-            
-            if not self.login_in_progress:
-                print("使用默认凭据自动登录...")
-        except Exception as e:
-            self.logger.error(f"处理登录请求时错误: {str(e)}")
-    
-    @EXPOSED
     def login_success(self, token):
         """登录成功回调"""
         try:
