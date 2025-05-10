@@ -120,10 +120,14 @@ C:\Users\wydx\Documents\Unreal Projects\Server\sample_client.py
 修改客户端和服务端代码，要求：
 1.服务端和客户端都具备相应的、主动断开连接的函数；
 
-
 C:\Users\wydx\Documents\Unreal Projects\Server\sample_server.py
 C:\Users\wydx\Documents\Unreal Projects\Server\sample_client.py
 修改客户端和服务端代码，要求：
 1.移除客户端和服务端reconnect相关功能，连接断开之后，不再有任何重连尝试；
 2.连接建立后，服务端会标记该客户端，如果客户端在一定时间内没有完成登录操作，则服务端会自动断开与客户端之间的连接；
 3.客户端在连接建立后，如果发送RPC请求在一定时间内没有收到来自服务端的回复，则客户端也会自动断开与服务端之间的连接；
+
+C:\Users\wydx\Documents\Unreal Projects\Server\sample_server.py
+C:\Users\wydx\Documents\Unreal Projects\Server\sample_client.py
+1.服务端的process_messages函数中，对于用户数据在登出前的保存操作，只是从数据库读取了数据然后又存回了数据库，这是不合逻辑的，应该是服务端通知旧客户端，让旧客户端运行save_user_data函数来将最新的客户端数据传输到服务端，然后服务端再将其保存到数据库。
+2.所有服务端断开连接时，都有要求对应客户端执行数据保存这一步。

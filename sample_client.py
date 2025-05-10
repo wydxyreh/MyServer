@@ -454,18 +454,7 @@ class ClientEntity:
         self.logger.warning(f"您被强制登出: {reason}")
         print(f"[系统] 您被强制登出: {reason}")
         
-        # 保存数据
-        print("[数据] 正在保存您的数据...")
-        if hasattr(self, 'user_data') and self.user_data:
-            try:
-                data_json = json.dumps(self.user_data)
-                self.caller.remote_call("userdata_save", data_json)
-                self.logger.info("被强制登出时已发送数据保存请求")
-            except Exception as e:
-                self.logger.error(f"在被强制登出时保存数据失败: {str(e)}")
-                print(f"[数据] 保存失败: {str(e)}")
-                # 即使保存失败也需要断开连接
-                self.disconnect(True)  # 禁用重连
+        # 服务端会在需要时通过 save_user_data 调用请求客户端保存数据
     
     @EXPOSED
     def server_shutdown(self, message):
@@ -591,10 +580,42 @@ class ClientEntity:
         print("[系统] 服务器已确认退出请求")
     
     @EXPOSED
+    def save_user_data(self):
+        """响应服务器的数据保存请求"""
+        self.logger.info("服务器请求保存用户数据")
+        print("[数据] 服务器请求保存您的数据...")
+        
+        if hasattr(self, 'user_data') and self.user_data:
+            try:
+                data_json = json.dumps(self.user_data)
+                self.caller.remote_call("userdata_save", data_json)
+                self.logger.info("已响应服务器请求，发送数据保存请求")
+                print("[数据] 已发送数据到服务器")
+            except Exception as e:
+                self.logger.error(f"响应服务器保存数据请求时失败: {str(e)}")
+                print(f"[数据] 保存失败: {str(e)}")
+        else:
+            self.logger.warning("服务器请求保存数据，但客户端没有可保存的数据")
+            print("[数据] 没有可保存的数据")
+    
+    @EXPOSED
     def connection_closed(self, reason):
         """服务器主动断开连接的回调"""
         self.logger.warning(f"服务器主动断开连接: {reason}")
         print(f"[系统] 服务器已断开连接: {reason}")
+        
+        # 在断开连接前尝试保存数据
+        if hasattr(self, 'user_data') and self.user_data:
+            self.logger.info("连接断开前尝试保存用户数据")
+            print("[数据] 连接断开前尝试保存数据...")
+            try:
+                data_json = json.dumps(self.user_data)
+                self.caller.remote_call("userdata_save", data_json)
+                self.logger.info("连接断开前已发送数据保存请求")
+            except Exception as e:
+                self.logger.error(f"连接断开前保存数据失败: {str(e)}")
+                print(f"[数据] 保存失败: {str(e)}")
+        
         # 设置标志以避免自动重连
         if self.network_manager:
             self.network_manager.auto_reconnect = False

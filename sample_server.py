@@ -383,20 +383,16 @@ class GameServerEntity:
         if not self.pending_messages:
             # 处理被登出逻辑
             if self.save_data_before_logout and self.authenticated:
-                self.logger.info(f"用户 {self.username} 被强制登出，正在保存数据")
+                self.logger.info(f"用户 {self.username} 被强制登出，正在请求客户端保存数据")
                 self.save_data_before_logout = False
-                # 执行数据保存操作
-                user_data = db_manager.load_user_data(self.username)
-                if user_data:
-                    # 这里简化处理，正常情况应该使用客户端当前的数据
-                    db_manager.save_user_data(self.username, user_data)
-                    self.logger.info(f"用户 {self.username} 的数据已保存")
-                    # 通知客户端数据已保存
-                    self._send_client_response("save_success")
                 
-                # 延迟断开连接，确保消息已发送
+                # 通知客户端保存数据
+                self._send_client_response("save_user_data")
+                self.logger.info(f"已发送保存数据请求给用户 {self.username} 的客户端")
+                
+                # 延迟断开连接，确保客户端有足够时间保存并上传数据
                 import threading
-                threading.Timer(0.5, self._request_client_removal).start()
+                threading.Timer(1.0, self._request_client_removal).start()
             return
             
         self.pending_messages = []  # 清空消息队列
@@ -436,13 +432,21 @@ class GameServerEntity:
         self.update_activity_time()
         self.logger.info(f'服务器收到客户端退出请求, 客户端ID: {self.id}, 用户: {self.username if self.authenticated else "未登录"}')
         
-        # 使token失效
-        if self.authenticated and self.token:
-            self.server.invalidate_token(self.token)
+        # 如果客户端已认证，则先请求保存数据
+        if self.authenticated:
+            self.logger.info(f"客户端ID: {self.id}, 用户: {self.username} 退出前请求保存数据")
+            # 通知客户端保存数据
+            self._send_client_response("save_user_data")
             
+            # 使token失效
+            if self.token:
+                self.server.invalidate_token(self.token)
+        
         self._send_client_response("exit_confirmed")
-        # 将客户端标记为待移除
-        self._request_client_removal()
+        
+        # 延迟断开连接，确保客户端有时间保存数据
+        import threading
+        threading.Timer(0.5, self._request_client_removal).start()
 
 class MyGameServer(SimpleServer):
     """游戏服务器类"""
