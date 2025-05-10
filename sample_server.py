@@ -471,6 +471,9 @@ class MyGameServer(SimpleServer):
             'msgs_sent': 0
         }
         
+        # 未登录客户端超时时间（秒）
+        self.login_timeout = 30  # 30秒内必须完成登录
+        
         # 注册网络事件处理
         self.host.onConnected = self.on_client_connected
         self.host.onDisconnected = self.on_client_disconnected
@@ -735,6 +738,7 @@ class MyGameServer(SimpleServer):
         """100ms低频定时器回调 - 处理统计和清理任务"""
         self._update_performance_stats()
         self._check_inactive_clients()
+        self._check_login_timeout_clients()  # 检查未登录客户端超时
         gc.collect()  # 执行垃圾回收
     
     def _update_performance_stats(self):
@@ -771,6 +775,19 @@ class MyGameServer(SimpleServer):
         for client_id, entity in list(self.clients.items()):
             if current_time - entity.last_activity_time > inactive_threshold:
                 self.logger.warning(f"客户端 {client_id} 长时间不活跃，断开连接")
+                self.mark_client_for_removal(client_id)
+    
+    def _check_login_timeout_clients(self):
+        """检查未完成登录的客户端是否超时"""
+        current_time = time.time()
+        for client_id, entity in list(self.clients.items()):
+            # 检查未认证客户端且连接时间超过登录超时时间
+            if not entity.authenticated and \
+               current_time - entity.last_activity_time > self.login_timeout:
+                self.logger.warning(f"客户端 {client_id} 未在规定时间内完成登录，断开连接")
+                # 通知客户端将被断开
+                if hasattr(entity, 'caller') and entity.caller:
+                    entity._send_client_response("connection_closed", "登录超时，连接已断开")
                 self.mark_client_for_removal(client_id)
     
     def tick(self):

@@ -104,47 +104,12 @@ class ClientNetworkManager:
         finally:
             self.connection_state = "disconnected"
     
-    def try_reconnect(self):
-        """尝试重新连接服务器，使用指数退避策略"""
-        # 如果禁用了自动重连，则直接返回
-        if not self.auto_reconnect:
-            return False
-            
-        if self.reconnect_attempts >= self.max_reconnect_attempts:
-            self.logger.error(f"已达最大重连次数 ({self.max_reconnect_attempts})")
-            return False
-            
-        current_time = time.time()
-        
-        # 计算指数退避时间
-        backoff_interval = min(30, self.reconnect_interval * (2 ** (self.reconnect_attempts - 1)))
-        if current_time - self.last_reconnect_time < backoff_interval:
-            return False
-            
-        self.last_reconnect_time = current_time
-        self.reconnect_attempts += 1
-        self.logger.info(f"尝试重连 (第 {self.reconnect_attempts} 次)")
-        
-        # 确保旧连接已关闭并创建新连接
-        self._close_socket()
-        self.socket = NetStream()
-        success = self.connect()
-        
-        # 重连成功时触发回调
-        if success and hasattr(self, 'on_reconnected') and callable(self.on_reconnected):
-            try:
-                self.on_reconnected(self.socket)
-            except Exception as e:
-                self.logger.error(f"执行重连回调时出错: {str(e)}")
-        
-        return success
+    # 移除重连功能，不再需要
     
     def process(self):
         """处理网络事件，返回接收到的数据"""
         if not self.connected:
-            # 尝试重连
-            if self.connection_state == "disconnected":
-                self.try_reconnect()
+            # 已断开连接，不再尝试重连
             return None
             
         try:
@@ -268,8 +233,7 @@ class ClientEntity:
         self.running = True
         self.pending_messages = []  # 待处理消息队列
         
-        # 注册重连回调
-        self.network_manager.on_reconnected = self._on_reconnect
+        # 不再需要重连回调
         
         # 认证相关
         self.authenticated = False
@@ -282,6 +246,10 @@ class ClientEntity:
         # 用户数据
         self.user_data = {}
         self.user_data_exists = False  # 标记用户数据是否存在
+        
+        # RPC超时设置
+        self.pending_rpc_calls = {}  # 存储待响应的RPC调用 {call_id: (timestamp, func_name)}
+        self.rpc_timeout = 10.0  # RPC调用超时时间(秒)
         
         # 设置定时器
         self._setup_timers()
