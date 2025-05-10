@@ -21,8 +21,30 @@ def EXPOSED(func):
     func.__exposed__ = True
     return func
 
+def log_function(func):
+    """装饰器，记录函数调用的名称、参数和执行完成情况"""
+    def wrapper(*args, **kwargs):
+        instance = args[0] if args else None
+        logger = instance.logger if hasattr(instance, 'logger') else logger_instance.get_logger('FunctionLogger')
+        
+        # 记录函数调用信息
+        args_repr = [repr(a) for a in args[1:]]
+        kwargs_repr = [f"{k}={v!r}" for k, v in kwargs.items()]
+        signature = ", ".join(args_repr + kwargs_repr)
+        logger.info(f"调用函数 {func.__name__}({signature})")
+        
+        # 执行函数
+        result = func(*args, **kwargs)
+        
+        # 记录函数执行完成
+        logger.info(f"函数 {func.__name__} 执行完成")
+        
+        return result
+    return wrapper
+
 class ClientNetworkManager:
     """客户端网络管理器，整合了NetworkSocket的心跳机制和NetStream的RPC功能"""
+    @log_function
     def __init__(self, host='127.0.0.1', port=2000):
         self.host = host
         self.port = port
@@ -43,6 +65,7 @@ class ClientNetworkManager:
         self.latency_samples = []
         self.last_ping_time = 0
         
+    @log_function
     def connect(self):
         """连接到服务器"""
         if self.connection_state == "connecting":
@@ -84,12 +107,14 @@ class ClientNetworkManager:
             self.connection_state = "disconnected"
             return False
     
+    @log_function
     def _on_connection_established(self):
         """连接建立成功后的处理"""
         self.connected = True
         self.connection_state = "connected"
         self.logger.info(f"已成功连接到服务器 {self.host}:{self.port}")
     
+    @log_function
     def _close_socket(self):
         """安全关闭套接字"""
         try:
@@ -99,6 +124,7 @@ class ClientNetworkManager:
         finally:
             self.connection_state = "disconnected"
     
+    @log_function
     def process(self):
         """处理网络事件，返回接收到的数据"""
         if not self.connected:
@@ -139,6 +165,7 @@ class ClientNetworkManager:
             self.connection_state = "disconnected"
             return None
     
+    @log_function
     def _process_send_buffer(self):
         """处理发送缓冲区中的数据"""
         if not self.send_buffer:
@@ -154,6 +181,7 @@ class ClientNetworkManager:
             if 'data' in locals():
                 self.send_buffer.insert(0, data)
     
+    @log_function
     def send(self, data):
         """发送数据到服务器"""
         if not self.connected:
@@ -164,6 +192,7 @@ class ClientNetworkManager:
         self.send_buffer.append(data)
         return True
     
+    @log_function
     def send_heartbeat(self):
         """发送心跳包以保持连接活跃"""
         cur_time = time.time()
@@ -174,6 +203,7 @@ class ClientNetworkManager:
             return True
         return False
     
+    @log_function
     def update_latency(self, server_time):
         """更新延迟信息"""
         if self.last_ping_time > 0:
@@ -188,6 +218,7 @@ class ClientNetworkManager:
                 avg_latency = sum(self.latency_samples) / len(self.latency_samples) if self.latency_samples else 0
                 self.logger.debug(f"网络延迟: {avg_latency:.2f}ms")
     
+    @log_function
     def disconnect(self):
         """主动断开连接"""
         self.logger.info("客户端主动断开连接")
@@ -195,6 +226,7 @@ class ClientNetworkManager:
         self.connected = False
         self.connection_state = "disconnected"
     
+    @log_function
     def close(self):
         """关闭连接并清理资源"""
         if self.socket:
@@ -206,6 +238,7 @@ class ClientEntity:
     """客户端实体类，用于与服务器交互"""
     EXPOSED_FUNC = {}
     
+    @log_function
     def __init__(self, network_manager):
         self.network_manager = network_manager
         self.socket = network_manager.socket
@@ -230,7 +263,8 @@ class ClientEntity:
         # RPC超时设置
         self.pending_rpc_calls = {}  # 存储待响应的RPC调用 {call_id: (timestamp, func_name)}
         self.rpc_timeout = 10.0  # RPC调用超时时间(秒)
-        
+    
+    @log_function
     def disconnect(self):
         """主动断开与服务器的连接
         Returns:
@@ -251,13 +285,15 @@ class ClientEntity:
             self.logger.error(f"断开连接时出错: {str(e)}")
             return False
     
+    @log_function
     def destroy(self):
         """销毁客户端实体，释放资源"""
         self.logger.info("客户端实体被销毁")
         if self.caller:
             self.caller.close()
         self.caller = self.socket = self.network_manager = None
-        
+    
+    @log_function
     def process_network(self):
         """处理网络事件"""
         if not self.running:
@@ -278,6 +314,7 @@ class ClientEntity:
         if data_list:
             self.pending_messages.extend(data_list)
     
+    @log_function
     def process_messages(self):
         """处理消息队列"""
         if not self.pending_messages:
@@ -293,6 +330,7 @@ class ClientEntity:
         # 清空消息队列
         self.pending_messages = []
     
+    @log_function
     def login(self):
         """执行登录操作
         
@@ -329,6 +367,7 @@ class ClientEntity:
             print(f"[登录] 错误: {str(e)}")
             return False
     
+    @log_function
     def logout(self):
         """执行登出操作"""
         if not self.authenticated:
@@ -346,6 +385,7 @@ class ClientEntity:
             return False
     
     @EXPOSED
+    @log_function
     def login_success(self, token):
         """登录成功回调"""
         try:
@@ -370,6 +410,7 @@ class ClientEntity:
             self.logger.error(f"处理登录成功回调时出错: {str(e)}")
     
     @EXPOSED
+    @log_function
     def token_invalid(self, reason):
         """token无效的回调"""
         self.logger.warning(f"Token无效: {reason}")
@@ -382,12 +423,14 @@ class ClientEntity:
         self.login()
     
     @EXPOSED
+    @log_function
     def process_existing_session(self, message):
         """处理已存在会话的回调"""
         self.logger.info(f"服务器正在处理旧会话: {message}")
         print(f"[登录] {message}")
     
     @EXPOSED
+    @log_function
     def logout_success(self):
         """登出成功回调"""
         self.authenticated = False
@@ -396,6 +439,7 @@ class ClientEntity:
         print("[登出] 成功!")
     
     @EXPOSED
+    @log_function
     def forced_logout(self, reason):
         """被强制登出的回调"""
         self.authenticated = False
@@ -406,6 +450,7 @@ class ClientEntity:
         # 服务端会在需要时通过 save_user_data 调用请求客户端保存数据
     
     @EXPOSED
+    @log_function
     def server_shutdown(self, message):
         """服务器关闭的回调"""
         self.logger.warning(f"服务器关闭通知: {message}")
@@ -415,6 +460,7 @@ class ClientEntity:
         # 设置定时器在3秒后关闭客户端
         threading.Timer(3.0, self._exit_program).start()
     
+    @log_function
     def _exit_program(self):
         """关闭程序"""
         self.logger.info("程序即将退出")
@@ -422,6 +468,7 @@ class ClientEntity:
         print("程序正在退出...")
     
     @EXPOSED
+    @log_function
     def login_failed(self, reason):
         """登录失败回调"""
         self.authenticated = False
@@ -431,6 +478,7 @@ class ClientEntity:
         print(f"[登录] 失败: {reason}")
     
     @EXPOSED
+    @log_function
     def userdata_update(self, data_json):
         """接收用户数据更新"""
         try:
@@ -445,6 +493,7 @@ class ClientEntity:
             print(f"[数据] 加载失败: {str(e)}")
     
     @EXPOSED
+    @log_function
     def save_success(self):
         """保存数据成功回调"""
         self.logger.info("数据保存成功")
@@ -456,6 +505,7 @@ class ClientEntity:
             print("[系统] 您的数据已保存，正在断开连接...")
             self.disconnect()
         
+    @log_function
     def save_user_data(self, data_json):
         """向服务器保存用户数据
         
@@ -477,6 +527,7 @@ class ClientEntity:
             print(f"[数据] 保存错误: {str(e)}")
             return False
             
+    @log_function
     def load_user_data(self):
         """从服务器加载最新的用户数据，结果通过userdata_update回调获取"""
         if not self.authenticated:
@@ -494,12 +545,14 @@ class ClientEntity:
             return False
     
     @EXPOSED
+    @log_function
     def data_error(self, message):
         """数据操作错误回调"""
         self.logger.warning(f"数据操作错误: {message}")
         print(f"[数据] 错误: {message}")
         
     @EXPOSED
+    @log_function
     def data_not_found(self, message):
         """数据不存在回调"""
         self.logger.info(f"数据不存在: {message}")
@@ -509,12 +562,14 @@ class ClientEntity:
         print("[数据] 您需要创建新的用户数据")
     
     @EXPOSED
+    @log_function
     def auth_error(self, message):
         """认证错误回调"""
         self.logger.warning(f"认证错误: {message}")
         print(f"[认证] 错误: {message}")
             
     @EXPOSED
+    @log_function
     def recv_msg_from_server(self, stat, msg):
         """接收服务器消息的回调函数"""
         self.logger.info(f'客户端收到服务器消息: stat={stat}, msg={msg}')
@@ -523,12 +578,14 @@ class ClientEntity:
         print(f"[服务器消息] {msg}")
     
     @EXPOSED
+    @log_function
     def exit_confirmed(self):
         """服务器确认退出的回调函数"""
         self.logger.info('服务器确认客户端退出')
         print("[系统] 服务器已确认退出请求")
     
     @EXPOSED
+    @log_function
     def save_user_data(self):
         """响应服务器的数据保存请求"""
         self.logger.info("服务器请求保存用户数据")
@@ -548,6 +605,7 @@ class ClientEntity:
             print("[数据] 没有可保存的数据")
     
     @EXPOSED
+    @log_function
     def connection_closed(self, reason):
         """服务器主动断开连接的回调"""
         self.logger.warning(f"服务器主动断开连接: {reason}")
@@ -566,11 +624,13 @@ class ClientEntity:
                 print(f"[数据] 保存失败: {str(e)}")
     
     @EXPOSED
+    @log_function
     def pong_response(self, message):
         """服务器ping测试响应"""
         self.logger.info(f"收到服务器ping响应: {message}")
         print(f"[连接测试] {message}")
 
+@log_function
 def setup_timers(client_entity, network_manager):
     """设置客户端定时器，处理网络事件和消息队列
     
@@ -632,6 +692,7 @@ def setup_timers(client_entity, network_manager):
     
     TimerManager.addRepeatTimer(0.5, check_exit)
 
+@log_function
 def main():
     """客户端主函数，初始化网络并设置定时器处理事件"""
     # 解析命令行参数

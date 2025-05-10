@@ -131,3 +131,28 @@ C:\Users\wydx\Documents\Unreal Projects\Server\sample_server.py
 C:\Users\wydx\Documents\Unreal Projects\Server\sample_client.py
 1.服务端的process_messages函数中，对于用户数据在登出前的保存操作，只是从数据库读取了数据然后又存回了数据库，这是不合逻辑的，应该是服务端通知旧客户端，让旧客户端运行save_user_data函数来将最新的客户端数据传输到服务端，然后服务端再将其保存到数据库。
 2.所有服务端断开连接时，都有要求对应客户端执行数据保存这一步。
+
+服务端日志：
+PS C:\Users\wydx\Documents\Unreal Projects\Server> & C:/Users/wydx/AppData/Local/Programs/Python/Python311/python.exe "c:/Users/wydx/Documents/Unreal Projects/Server/sample_server.py"
+2025-05-10 16:50:48,287 - DatabaseManager - INFO - 初始化数据库: server_data.db
+2025-05-10 16:50:48,295 - GameServer - INFO - 游戏服务器初始化
+2025-05-10 16:50:48,295 - Main - INFO - 服务器已启动，正在监听 0.0.0.0:2000...
+2025-05-10 16:50:51,201 - GameServer - INFO - 新客户端连接: ID=65536, IP=127.0.0.1
+2025-05-10 16:50:51,201 - GameServer - INFO - 创建新的游戏实体 ID: 1, IP: 127.0.0.1
+2025-05-10 16:50:53,209 - GameServer - INFO - 客户端断开连接: ID=65536, IP=127.0.0.1, 用户=未登录
+2025-05-10 16:50:53,216 - GameServer - INFO - 销毁游戏实体 ID: 1, IP: 127.0.0.1
+2025-05-10 16:50:58,330 - GameServer - INFO - 新客户端连接: ID=131072, IP=127.0.0.1
+2025-05-10 16:50:58,331 - GameServer - INFO - 创建新的游戏实体 ID: 2, IP: 127.0.0.1
+2025-05-10 16:51:28,337 - GameServer - WARNING - 客户端 131072 未在规定时间内完成登录，断开连接
+2025-05-10 16:51:28,363 - GameServer - INFO - 销毁游戏实体 ID: 2, IP: 127.0.0.1
+2025-05-10 16:52:08,331 - GameServer - INFO - 客户端断开连接: ID=131072
+
+客户端日志：
+= RESTART: C:\Users\wydx\Documents\Unreal Projects\Server\sample_client.py
+2025-05-10 16:50:58,315 - SampleClient - INFO - 客户端日志文件: C:\Users\wydx\Documents\Unreal Projects\Server\Logs\SampleClient_20250510_165058.log
+2025-05-10 16:50:58,326 - ClientNetwork - INFO - 尝试连接服务器: 127.0.0.1:2000
+2025-05-10 16:50:58,329 - ClientNetwork - INFO - 已成功连接到服务器 127.0.0.1:2000
+2025-05-10 16:50:58,331 - SampleClient - INFO - 成功连接到服务器
+
+在服务端因为登录超时而断开连接之后，客户端并没出现任何的通知提示；
+理论上来讲，服务端会调用客户端的connection_closed函数，而客户端的connection_closed函数会有日志输出，而客户端日志中却又没有对应日志显示，分析并解决这个问题；
