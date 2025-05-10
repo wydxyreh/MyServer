@@ -29,17 +29,12 @@ class ClientNetworkManager:
         self.logger = logger_instance.get_logger('ClientNetwork')
         self.connected = False
         self.heartbeat_interval = 5.0  # 心跳间隔(秒)
-        self.reconnect_interval = 3.0  # 重连间隔(秒)
         self.last_heartbeat_time = 0
-        self.last_reconnect_time = 0
         self.setup_time = 0
         self.heartbeat_count = 0
-        self.reconnect_attempts = 0
-        self.max_reconnect_attempts = 5
         self.recv_buffer = []  # 缓存接收到的数据
         self.send_buffer = []  # 缓存发送请求
         self.connection_state = "disconnected"  # 连接状态: disconnected, connecting, connected
-        self.auto_connect = True  # 是否自动重连
         
         # 网络统计
         self.bytes_sent = 0
@@ -92,7 +87,6 @@ class ClientNetworkManager:
         """连接建立成功后的处理"""
         self.connected = True
         self.connection_state = "connected"
-        self.reconnect_attempts = 0  # 重置重连计数
         self.logger.info(f"已成功连接到服务器 {self.host}:{self.port}")
     
     def _close_socket(self):
@@ -103,8 +97,6 @@ class ClientNetworkManager:
             self.logger.warning(f"关闭套接字时发生异常: {str(e)}")
         finally:
             self.connection_state = "disconnected"
-    
-    # 移除重连功能，不再需要
     
     def process(self):
         """处理网络事件，返回接收到的数据"""
@@ -195,16 +187,9 @@ class ClientNetworkManager:
                 avg_latency = sum(self.latency_samples) / len(self.latency_samples) if self.latency_samples else 0
                 self.logger.debug(f"网络延迟: {avg_latency:.2f}ms")
     
-    def disconnect(self, disable_reconnect=False):
-        """主动断开连接
-        
-        Args:
-            disable_reconnect: 是否禁用自动重连功能
-        """
+    def disconnect(self):
+        """主动断开连接"""
         self.logger.info("客户端主动断开连接")
-        if disable_reconnect:
-            self.auto_reconnect = False
-            self.logger.info("已禁用自动重连")
         self._close_socket()
         self.connected = False
         self.connection_state = "disconnected"
@@ -259,31 +244,10 @@ class ClientEntity:
         TimerManager.addRepeatTimer(0.01, self.process_network)  # 10ms定时器 - 处理网络
         TimerManager.addRepeatTimer(0.1, self.process_messages)  # 100ms定时器 - 处理消息
     
-    def _on_reconnect(self, new_socket):
-        """处理重连事件，重置RPC代理"""
-        self.logger.info("连接已重建，重置RPC代理")
-        self.socket = new_socket
+    # 移除重连事件处理方法
         
-        # 重新创建RPC代理
-        if hasattr(self, 'caller'):
-            try:
-                self.caller.close()  # 关闭旧的RPC代理
-            except Exception as e:
-                self.logger.error(f"关闭旧RPC代理时出错: {str(e)}")
-                
-        self.caller = RpcProxy(self, self.socket)
-        self.logger.info("RPC代理已重置")
-        
-        # 重置认证状态
-        self.authenticated = False
-        self.token = None  # 清除token，强制使用账密重新登录
-        
-    def disconnect(self, disable_reconnect=False):
+    def disconnect(self):
         """主动断开与服务器的连接
-        
-        Args:
-            disable_reconnect: 是否禁用自动重连
-        
         Returns:
             bool: 是否成功发送断开请求
         """
@@ -296,7 +260,7 @@ class ClientEntity:
                 
             # 然后断开网络连接
             if self.network_manager:
-                self.network_manager.disconnect(disable_reconnect)
+                self.network_manager.disconnect()
                 return True
         except Exception as e:
             self.logger.error(f"断开连接时出错: {str(e)}")
@@ -505,7 +469,7 @@ class ClientEntity:
         if not self.authenticated and hasattr(self, 'token') and self.token is None:
             self.logger.info("强制登出状态下数据保存成功，现在断开连接")
             print("[系统] 您的数据已保存，正在断开连接...")
-            self.disconnect(True)  # 禁用重连
+            self.disconnect()
         
     def save_user_data(self, data_json):
         """向服务器保存用户数据
@@ -615,10 +579,6 @@ class ClientEntity:
             except Exception as e:
                 self.logger.error(f"连接断开前保存数据失败: {str(e)}")
                 print(f"[数据] 保存失败: {str(e)}")
-        
-        # 设置标志以避免自动重连
-        if self.network_manager:
-            self.network_manager.auto_reconnect = False
     
     @EXPOSED
     def pong_response(self, message):
@@ -633,7 +593,6 @@ def main():
     parser.add_argument('--port', type=int, default=2000, help='服务器端口 (默认: 2000)')
     parser.add_argument('--username', default=None, help='登录用户名 (默认: netease1)')
     parser.add_argument('--password', default=None, help='登录密码 (默认: 123)')
-    parser.add_argument('--no-reconnect', action='store_true', help='禁用自动重连')
     args = parser.parse_args()
     
     # 设置日志
@@ -645,10 +604,6 @@ def main():
     network_manager = ClientNetworkManager(args.host, args.port)
     
     try:
-        # 如果指定了--no-reconnect参数，则禁用自动重连
-        if args.no_reconnect:
-            network_manager.max_reconnect_attempts = 0
-            logger.info("已禁用自动重连功能")
         
         # 连接服务器
         if not network_manager.connect():
