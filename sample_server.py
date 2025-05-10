@@ -677,6 +677,53 @@ class MyGameServer(SimpleServer):
         """重写tick方法 - 主要流程由定时器处理"""
         TimerManager.scheduler()
 
+    def disconnect_client(self, client_id, reason="服务器主动断开连接"):
+        """主动断开指定客户端的连接
+        
+        Args:
+            client_id: 客户端ID
+            reason: 断开原因
+        
+        Returns:
+            bool: 断开成功返回True，否则返回False
+        """
+        if client_id not in self.clients:
+            self.logger.warning(f"尝试断开不存在的客户端连接: {client_id}")
+            return False
+            
+        try:
+            client = self.clients[client_id]
+            # 通知客户端将被断开连接
+            if client and client.caller:
+                client._send_client_response("connection_closed", reason)
+                
+            self.logger.info(f"服务器主动断开客户端 {client_id} 连接: {reason}")
+            # 标记客户端为待移除
+            self.mark_client_for_removal(client_id)
+            return True
+        except Exception as e:
+            self.logger.error(f"断开客户端 {client_id} 连接时出错: {str(e)}")
+            return False
+    
+    def disconnect_user(self, username, reason="服务器主动断开连接"):
+        """通过用户名主动断开指定用户的连接
+        
+        Args:
+            username: 用户名
+            reason: 断开原因
+        
+        Returns:
+            bool: 断开成功返回True，否则返回False
+        """
+        if username not in self.clients_by_username:
+            self.logger.warning(f"尝试断开不存在的用户连接: {username}")
+            return False
+            
+        client = self.clients_by_username[username]
+        if client and hasattr(client, 'netstream') and client.netstream:
+            return self.disconnect_client(client.netstream.hid, reason)
+        return False
+    
     def shutdown_all_clients(self, reason="服务器正在关闭"):
         """优雅地关闭所有客户端连接"""
         self.logger.info(f"通知所有客户端服务器关闭: {reason}")

@@ -39,6 +39,7 @@ class ClientNetworkManager:
         self.recv_buffer = []  # 缓存接收到的数据
         self.send_buffer = []  # 缓存发送请求
         self.connection_state = "disconnected"  # 连接状态: disconnected, connecting, connected
+        self.auto_connect = True  # 是否自动重连
         
         # 网络统计
         self.bytes_sent = 0
@@ -105,6 +106,10 @@ class ClientNetworkManager:
     
     def try_reconnect(self):
         """尝试重新连接服务器，使用指数退避策略"""
+        # 如果禁用了自动重连，则直接返回
+        if not self.auto_reconnect:
+            return False
+            
         if self.reconnect_attempts >= self.max_reconnect_attempts:
             self.logger.error(f"已达最大重连次数 ({self.max_reconnect_attempts})")
             return False
@@ -225,8 +230,22 @@ class ClientNetworkManager:
                 avg_latency = sum(self.latency_samples) / len(self.latency_samples) if self.latency_samples else 0
                 self.logger.debug(f"网络延迟: {avg_latency:.2f}ms")
     
+    def disconnect(self, disable_reconnect=False):
+        """主动断开连接
+        
+        Args:
+            disable_reconnect: 是否禁用自动重连功能
+        """
+        self.logger.info("客户端主动断开连接")
+        if disable_reconnect:
+            self.auto_reconnect = False
+            self.logger.info("已禁用自动重连")
+        self._close_socket()
+        self.connected = False
+        self.connection_state = "disconnected"
+    
     def close(self):
-        """关闭连接"""
+        """关闭连接并清理资源"""
         if self.socket:
             self.logger.info("关闭网络连接")
             self._close_socket()
@@ -291,6 +310,30 @@ class ClientEntity:
         self.authenticated = False
         self.token = None
         
+    def disconnect(self, disable_reconnect=False):
+        """主动断开与服务器的连接
+        
+        Args:
+            disable_reconnect: 是否禁用自动重连
+        
+        Returns:
+            bool: 是否成功发送断开请求
+        """
+        try:
+            # 先向服务器发送退出请求
+            if self.network_manager.connected and self.caller:
+                self.logger.info("向服务器发送退出请求")
+                self.caller.remote_call("exit")
+                print("[系统] 已发送断开连接请求到服务器")
+                
+            # 然后断开网络连接
+            if self.network_manager:
+                self.network_manager.disconnect(disable_reconnect)
+                return True
+        except Exception as e:
+            self.logger.error(f"断开连接时出错: {str(e)}")
+            return False
+    
     def destroy(self):
         """销毁客户端实体，释放资源"""
         self.logger.info("客户端实体被销毁")
@@ -477,6 +520,15 @@ class ClientEntity:
         """服务器确认退出的回调函数"""
         self.logger.info('服务器确认客户端退出')
         print("[系统] 服务器已确认退出请求")
+    
+    @EXPOSED
+    def connection_closed(self, reason):
+        """服务器主动断开连接的回调"""
+        self.logger.warning(f"服务器主动断开连接: {reason}")
+        print(f"[系统] 服务器已断开连接: {reason}")
+        # 设置标志以避免自动重连
+        if self.network_manager:
+            self.network_manager.auto_reconnect = False
     
     @EXPOSED
     def pong_response(self, message):
