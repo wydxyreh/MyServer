@@ -862,6 +862,28 @@ class MyGameServer(SimpleServer):
         except Exception as e:
             self.logger.error(f"断开客户端 {client_id} 连接时出错: {str(e)}")
             return False
+            
+    def shutdown_all_clients(self):
+        """关闭所有客户端连接
+        
+        在服务器关闭时调用，通知所有客户端服务器即将关闭
+        """
+        self.logger.info(f"正在关闭所有客户端连接，当前连接数: {len(self.clients)}")
+        
+        for client_id in list(self.clients.keys()):
+            try:
+                client = self.clients.get(client_id)
+                if client and client.caller:
+                    # 通知客户端服务器关闭
+                    client._send_client_response("server_shutdown", "服务器正在关闭")
+                    
+                # 标记客户端待移除
+                self.mark_client_for_removal(client_id)
+            except Exception as e:
+                self.logger.error(f"关闭客户端 {client_id} 连接时出错: {str(e)}")
+                
+        # 处理待移除的客户端
+        self._remove_marked_clients()
 
 def signal_handler(signum, frame):
     """处理系统信号"""
