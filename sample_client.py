@@ -17,6 +17,7 @@ from server.common.timer import TimerManager
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 def EXPOSED(func):
+    """装饰器，标记可被RPC调用的函数"""
     func.__exposed__ = True
     return func
 
@@ -205,10 +206,6 @@ class ClientEntity:
     """客户端实体类，用于与服务器交互"""
     EXPOSED_FUNC = {}
     
-    # 账号信息全局变量
-    DEFAULT_USERNAME = "netease1"
-    DEFAULT_PASSWORD = "123"
-    
     def __init__(self, network_manager):
         self.network_manager = network_manager
         self.socket = network_manager.socket
@@ -218,12 +215,10 @@ class ClientEntity:
         self.running = True
         self.pending_messages = []  # 待处理消息队列
         
-        # 不再需要重连回调
-        
         # 认证相关
         self.authenticated = False
-        self.username = self.DEFAULT_USERNAME
-        self.password = self.DEFAULT_PASSWORD
+        self.username = ""
+        self.password = ""
         self.token = None  # 只在内存中临时存储token
         self.login_in_progress = False
         self.login_attempts = 0
@@ -235,16 +230,6 @@ class ClientEntity:
         # RPC超时设置
         self.pending_rpc_calls = {}  # 存储待响应的RPC调用 {call_id: (timestamp, func_name)}
         self.rpc_timeout = 10.0  # RPC调用超时时间(秒)
-        
-        # 设置定时器
-        self._setup_timers()
-        
-    def _setup_timers(self):
-        """设置定时器"""
-        TimerManager.addRepeatTimer(0.01, self.process_network)  # 10ms定时器 - 处理网络
-        TimerManager.addRepeatTimer(0.1, self.process_messages)  # 100ms定时器 - 处理消息
-    
-    # 移除重连事件处理方法
         
     def disconnect(self):
         """主动断开与服务器的连接
@@ -312,7 +297,7 @@ class ClientEntity:
         """执行登录操作
         
         尝试使用以下优先级登录:
-        1. 如果有token1. 如果有token，先尝试使用token登录
+        1. 如果有token，先尝试使用token登录
         2. 否则，使用用户名和密码登录
         """
         if not self.network_manager.connected:
@@ -586,13 +571,75 @@ class ClientEntity:
         self.logger.info(f"收到服务器ping响应: {message}")
         print(f"[连接测试] {message}")
 
+def setup_timers(client_entity, network_manager):
+    """设置客户端定时器，处理网络事件和消息队列
+    
+    Args:
+        client_entity: 客户端实体实例
+        network_manager: 网络管理器实例
+    """
+    logger = logger_instance.get_logger('SampleClient')
+    
+    # 1. 添加定时器调度器任务 - 最高优先级
+    TimerManager.addRepeatTimer(0.001, TimerManager.scheduler)
+    
+    # 2. 添加10ms定时器处理网络事件
+    def process_network():
+        if client_entity.running:
+            # 处理网络并获取数据
+            data_list = network_manager.process()
+            
+            # 如果连接断开，处理token清除
+            if not network_manager.connected and client_entity.token:
+                logger.info("连接断开，清除token")
+                client_entity.token = None
+                return
+                
+            # 处理接收到的数据
+            if data_list:
+                client_entity.pending_messages.extend(data_list)
+                
+    TimerManager.addRepeatTimer(0.01, process_network)  # 10ms定时器
+    
+    # 3. 添加100ms定时器处理消息队列
+    def process_messages():
+        if not client_entity.running or not client_entity.pending_messages:
+            return
+            
+        # 批量处理消息
+        for data in client_entity.pending_messages:
+            try:
+                client_entity.caller.parse_rpc(data)
+            except Exception as e:
+                logger.error(f"解析RPC数据时出错: {str(e)}")
+                
+        # 清空消息队列
+        client_entity.pending_messages = []
+        
+    TimerManager.addRepeatTimer(0.1, process_messages)  # 100ms定时器
+    
+    # 4. 添加退出检查定时器
+    def check_exit():
+        if not client_entity.running:
+            # 清理资源
+            client_entity.destroy()
+            network_manager.close()
+            logger.info("客户端正常退出")
+            # 停止所有定时器
+            TimerManager.clear_all_timers()
+            # 退出程序
+            os._exit(0)
+    
+    TimerManager.addRepeatTimer(0.5, check_exit)
+
 def main():
+    """客户端主函数，初始化网络并设置定时器处理事件"""
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='客户端')
     parser.add_argument('--host', default='127.0.0.1', help='服务器地址 (默认: 127.0.0.1)')
     parser.add_argument('--port', type=int, default=2000, help='服务器端口 (默认: 2000)')
-    parser.add_argument('--username', default=None, help='登录用户名 (默认: netease1)')
-    parser.add_argument('--password', default=None, help='登录密码 (默认: 123)')
+    parser.add_argument('--username', default=None, help='登录用户名')
+    parser.add_argument('--password', default=None, help='登录密码')
     args = parser.parse_args()
     
     # 设置日志
@@ -604,10 +651,9 @@ def main():
     network_manager = ClientNetworkManager(args.host, args.port)
     
     try:
-        
         # 连接服务器
         if not network_manager.connect():
-            logger.warning("初始连接失败，将尝试自动重连")
+            logger.warning("初始连接失败，请检查服务器是否启动")
         
         # 创建客户端实体
         client_entity = ClientEntity(network_manager)
@@ -623,8 +669,7 @@ def main():
             try:
                 if hasattr(signal, 'SIGINT'):
                     def signal_handler(signum, frame):
-                        signal_name = "SIGINT" if signum == signal.SIGINT else f"Signal {signum}"
-                        logger.info(f"收到信号: {signal_name}")
+                        logger.info(f"收到退出信号")
                         client_entity.running = False
                         print("\n正在退出客户端...")
                     
@@ -635,16 +680,21 @@ def main():
         
         setup_signal_handlers()
         
-        # 主循环 - 运行定时器调度
-        while client_entity.running:
-            TimerManager.scheduler()
-            time.sleep(0.001)  # 微小的延迟以减轻CPU负担
+        # 设置定时器
+        setup_timers(client_entity, network_manager)
         
-        # 清理资源
-        client_entity.destroy()
-        network_manager.close()
-        logger.info("客户端正常退出")
-        
+        # 使用事件等待保持主线程运行
+        try:
+            # 在支持signal.pause()的平台使用它，否则使用事件等待
+            if hasattr(signal, 'pause'):
+                signal.pause()
+            else:
+                wait_event = threading.Event()
+                wait_event.wait()  # 永久等待
+        except KeyboardInterrupt:
+            # Ctrl+C会触发KeyboardInterrupt，但我们已经在信号处理器中处理了
+            pass
+            
     except KeyboardInterrupt:
         logger.info("用户中断，客户端退出")
     except Exception as e:
