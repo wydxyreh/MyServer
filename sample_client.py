@@ -124,7 +124,6 @@ class ClientNetworkManager:
         finally:
             self.connection_state = "disconnected"
     
-    @log_function
     def process(self):
         """处理网络事件，返回接收到的数据"""
         if not self.connected:
@@ -165,7 +164,6 @@ class ClientNetworkManager:
             self.connection_state = "disconnected"
             return None
     
-    @log_function
     def _process_send_buffer(self):
         """处理发送缓冲区中的数据"""
         if not self.send_buffer:
@@ -192,7 +190,6 @@ class ClientNetworkManager:
         self.send_buffer.append(data)
         return True
     
-    @log_function
     def send_heartbeat(self):
         """发送心跳包以保持连接活跃"""
         cur_time = time.time()
@@ -610,7 +607,7 @@ class ClientEntity:
         """服务器主动断开连接的回调"""
         self.logger.warning(f"服务器主动断开连接: {reason}")
         print(f"[系统] 服务器已断开连接: {reason}")
-        
+    
         # 在断开连接前尝试保存数据
         if hasattr(self, 'user_data') and self.user_data:
             self.logger.info("连接断开前尝试保存用户数据")
@@ -622,6 +619,11 @@ class ClientEntity:
             except Exception as e:
                 self.logger.error(f"连接断开前保存数据失败: {str(e)}")
                 print(f"[数据] 保存失败: {str(e)}")
+    
+        # 短暂延迟后主动关闭连接，确保有时间发送最后的消息
+        import threading
+        threading.Timer(0.5, self.disconnect).start()
+        self.logger.info("计划在0.5秒后关闭客户端连接")
     
     @EXPOSED
     @log_function
@@ -751,17 +753,15 @@ def main():
         # 设置定时器
         setup_timers(client_entity, network_manager)
         
-        # 使用事件等待保持主线程运行
+        # 主循环，确保定时器能被执行
         try:
-            # 在支持signal.pause()的平台使用它，否则使用事件等待
-            if hasattr(signal, 'pause'):
-                signal.pause()
-            else:
-                wait_event = threading.Event()
-                wait_event.wait()  # 永久等待
+            while client_entity.running:
+                # 每次循环都调度定时器任务
+                TimerManager.scheduler()
+                time.sleep(0.001)  # 释放CPU时间片
         except KeyboardInterrupt:
-            # Ctrl+C会触发KeyboardInterrupt，但我们已经在信号处理器中处理了
-            pass
+            client_entity.running = False
+            logger.info("用户中断，客户端退出")
             
     except KeyboardInterrupt:
         logger.info("用户中断，客户端退出")

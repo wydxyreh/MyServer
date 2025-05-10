@@ -621,7 +621,9 @@ class MyGameServer(SimpleServer):
                                f"用户={client.username if client.authenticated else '未登录'}")
             else:
                 self.logger.info(f"客户端断开连接: ID={client_id}")
-            
+                # 客户端已经不存在，无需再次标记移除
+                return
+        
             self.mark_client_for_removal(client_id)
         except Exception as e:
             self._log_error(f"处理客户端断开连接时出错", e)
