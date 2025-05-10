@@ -262,6 +262,7 @@ class ClientEntity:
         
         # 用户数据
         self.user_data = {}
+        self.user_data_exists = False  # 标记用户数据是否存在
         
         # 设置定时器
         self._setup_timers()
@@ -390,6 +391,7 @@ class ClientEntity:
         """接收用户数据更新"""
         try:
             self.user_data = json.loads(data_json)
+            self.user_data_exists = True  # 标记数据已存在
             self.logger.info("接收用户数据")
             # 截断显示数据，避免过长输出
             data_preview = data_json[:50] + ("..." if len(data_json) > 50 else "")
@@ -403,12 +405,58 @@ class ClientEntity:
         """保存数据成功回调"""
         self.logger.info("数据保存成功")
         print("[数据] 保存成功")
+        
+    def save_user_data(self, data_json):
+        """向服务器保存用户数据
+        
+        Args:
+            data_json: JSON格式的数据，可以是字符串或JavaScript对象
+        """
+        if not self.authenticated:
+            self.logger.warning("尝试保存数据但未认证")
+            print("[数据] 错误: 请先登录")
+            return False
+            
+        try:
+            self.logger.info("发送数据保存请求到服务器")
+            # 直接将JSON数据传递给服务器，不做额外转换
+            self.caller.remote_call("userdata_save", data_json)
+            return True
+        except Exception as e:
+            self.logger.error(f"保存数据时出错: {str(e)}")
+            print(f"[数据] 保存错误: {str(e)}")
+            return False
+            
+    def load_user_data(self):
+        """从服务器加载最新的用户数据，结果通过userdata_update回调获取"""
+        if not self.authenticated:
+            self.logger.warning("尝试加载数据但未认证")
+            print("[数据] 错误: 请先登录")
+            return False
+            
+        try:
+            self.logger.info("发送数据加载请求到服务器")
+            self.caller.remote_call("userdata_load")
+            return True
+        except Exception as e:
+            self.logger.error(f"请求加载数据时出错: {str(e)}")
+            print(f"[数据] 加载错误: {str(e)}")
+            return False
     
     @EXPOSED
     def data_error(self, message):
         """数据操作错误回调"""
         self.logger.warning(f"数据操作错误: {message}")
         print(f"[数据] 错误: {message}")
+        
+    @EXPOSED
+    def data_not_found(self, message):
+        """数据不存在回调"""
+        self.logger.info(f"数据不存在: {message}")
+        print(f"[数据] 提示: {message}")
+        # 可以在这里设置一个标志，让用户知道需要创建新数据
+        self.user_data_exists = False
+        print("[数据] 您需要创建新的用户数据")
     
     @EXPOSED
     def auth_error(self, message):

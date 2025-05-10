@@ -253,14 +253,12 @@ class GameServerEntity:
             self._send_client_response("userdata_update", user_data)
         else:
             self.logger.warning(f"用户 {username} 无用户数据")
-            # 创建空的用户数据结构
-            empty_data = json.dumps({"name": username})
-            db_manager.save_user_data(username, empty_data)
-            self._send_client_response("userdata_update", empty_data)
+            # 通知客户端未找到用户数据
+            self._send_client_response("data_not_found", "首次登录，未找到用户数据")
     
     @EXPOSED
     def userdata_load(self):
-        """加载用户数据"""
+        """加载用户数据 - 从数据库获取最新版本的数据"""
         if not self._verify_auth_with_token("数据加载"):
             return
         
@@ -270,22 +268,23 @@ class GameServerEntity:
             self.logger.info(f"为用户 {self.username} 加载数据")
             self._send_client_response("userdata_update", user_data)
         else:
-            self.logger.warning(f"无法加载用户 {self.username} 的数据")
-            self._send_client_response("data_error", "加载数据失败")
+            self.logger.warning(f"未找到用户 {self.username} 的数据")
+            # 明确告知客户端数据不存在
+            self._send_client_response("data_not_found", "在数据库中未找到用户数据")
     
     @EXPOSED
     def userdata_save(self, data_json):
-        """保存用户数据"""
+        """保存用户数据 - 将数据存储到数据库，与账密关联"""
         if not self._verify_auth_with_token("数据保存"):
             return
         
         # 保存数据
         try:
-            # 验证并处理JSON数据
-            data_json = self._validate_json_data(data_json)
-            if data_json is None:  # 验证失败
+            # 验证JSON数据格式
+            if not self._validate_json_data(data_json):
                 return
-                
+            
+            # 使用用户名作为唯一索引键存储数据    
             success = db_manager.save_user_data(self.username, data_json)
             
             if success:
@@ -300,20 +299,26 @@ class GameServerEntity:
             self._send_client_response("data_error", f"保存数据时出错: {str(e)}")
     
     def _validate_json_data(self, data):
-        """验证JSON数据格式"""
+        """验证JSON数据格式
+        
+        Args:
+            data: 要验证的JSON数据
+            
+        Returns:
+            bool: 数据有效返回True，否则返回False
+        """
         try:
             if isinstance(data, str):
                 # 尝试验证JSON格式
                 json.loads(data)
-                return data
-            else:
-                # 如果不是字符串，尝试转换为JSON字符串
-                return json.dumps(data)
+            # 如果数据已经是字典或其他Python对象，视为有效
+            
+            return True
                 
         except json.JSONDecodeError:
             self.logger.error(f"无效的JSON数据格式")
             self._send_client_response("data_error", "无效的数据格式")
-            return None
+            return False
     
     def process_messages(self):
         """批量处理积累的消息"""

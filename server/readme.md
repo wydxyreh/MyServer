@@ -99,3 +99,15 @@ C:\Users\wydx\Documents\Unreal Projects\Server\sample_server.py
 C:\Users\wydx\Documents\Unreal Projects\Server\server\common\db_manager.py
 对于服务端的_verify_token、_verify_auth、_verify_auth_with_token等函数，以及db_manager的invalidate_token、validate_token、_invalidate_tokens_for_user等函数，本质上是将服务端的token放在了数据库部分进行处理，这和我的预期不符，我期望token仅仅是每次服务端和客户端通信连接建立时，临时使用的一次性身份凭证，不需要和数据库进行交互处理，在服务端中设置一个数据结构对其进行管理即可；
 所以，移除数据库中对token的处理和验证部分代码，同时将相关token处理放在服务端完成
+
+C:\Users\wydx\Documents\Unreal Projects\Server\sample_server.py
+C:\Users\wydx\Documents\Unreal Projects\Server\sample_client.py
+C:\Users\wydx\Documents\Unreal Projects\Server\server\common\db_manager.py
+修改客户端和服务端代码，要求：
+1.服务端向客户端提供数据保存def userdata_save(self, data_json)和加载def userdata_load(self)的操作，当客户端调用服务端userdata_save时，客户端会向服务端提供一段json数据，然后服务端接受到该json数据后，会结合客户端的账密作为数据库中的唯一索引键，将其存储在数据库中，如果数据库中该账密已有旧数据，则按照时间顺序对新旧数据进行排序，之后客户端再调用userdata_load时，服务端会读取数据库中该账密下最新的json数据并返回给客户端。
+2.考虑到客户端登录首次使用账密，后续使用临时token（每个客户端账密同一时间只有一个临时token有效），服务端对客户端的身份识别和数据库中的数据对应，要以账密作为唯一索引键，而数据库中不要有token的介入，tokne只存储于服务端当中；这样无论客户端是以账密登录，还是以token登录，服务端都可以将其转换成账密，在数据库中对该账密下的json数据进行为索引。
+
+1.双端支持登陆、登出，功能，由客户端主动发起，服务端自动响应；
+客户端首次登录服务端只支持账密登录，登录完成后，由服务端生成一次性的token，在该次连接中，后续客户端进行其他的操作时，都可以携带该token进行身份验证，无需再使用账密，并且客户端如果有token，则默认使用token登录，否则使用账密登录。
+2.但是在连接断开后，该一次性token就会失效，下次如果有客户端再使用该token登录，登录便会失败。
+3.当有新客户端使用已登录的账密尝试再次登录时，服务端会通知之前已登录的旧客户端被登出，旧客户端接收到被登出通知后，会强制调用一次userdata_save操作，将当前的用户数据进行保存，保存结束后，再通知服务端，服务端在接收到来自旧客户端的通知后，便会和旧客户端断开连接（断开连接时，服务端会自动无效旧token），然后生成新的token，给最新使用账密登录的新客户端使用。

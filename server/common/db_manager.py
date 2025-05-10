@@ -35,16 +35,24 @@ class DatabaseManager:
                 )
                 ''')
                 
-                # 创建用户数据表
+                # 创建用户数据表 (修改为支持多个数据版本)
                 cursor.execute('''
                 CREATE TABLE IF NOT EXISTS user_data (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT NOT NULL,
                     data_json TEXT NOT NULL,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (username) REFERENCES users(username),
-                    UNIQUE(username)
+                    FOREIGN KEY (username) REFERENCES users(username)
                 )
+                ''')
+                
+                # 为username和updated_at创建索引以加速查询
+                cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_user_data_username ON user_data(username)
+                ''')
+                
+                cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_user_data_timestamp ON user_data(updated_at)
                 ''')
                 
                 # 检查是否需要添加预设账号
@@ -143,21 +151,15 @@ class DatabaseManager:
     # 令牌管理已移至 MyGameServer 类，此处移除重复的令牌管理方法
     
     def save_user_data(self, username, data_json):
-        """保存用户数据"""
+        """保存用户数据 - 按时间顺序存储多个版本
+        
+        Args:
+            username: 用户名，作为数据库中的索引键
+            data_json: JSON格式的数据，直接存储不做额外转换
+        """
         self.logger.info(f"保存用户数据: {username}")
         
         try:
-            # 验证JSON数据
-            try:
-                if isinstance(data_json, str):
-                    json_data = json.loads(data_json)
-                else:
-                    json_data = data_json
-                    data_json = json.dumps(data_json)
-            except json.JSONDecodeError:
-                self.logger.error(f"无效的JSON数据: {data_json}")
-                return False
-            
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 
@@ -167,17 +169,17 @@ class DatabaseManager:
                     self.logger.error(f"用户 {username} 不存在")
                     return False
                 
-                # 更新或插入用户数据
+                # 插入新数据记录（不替换旧记录，而是添加新版本）
                 cursor.execute(
                     """
-                    INSERT OR REPLACE INTO user_data (username, data_json, updated_at)
+                    INSERT INTO user_data (username, data_json, updated_at)
                     VALUES (?, ?, CURRENT_TIMESTAMP)
                     """,
                     (username, data_json)
                 )
                 
                 conn.commit()
-                self.logger.info(f"成功保存用户 {username} 的数据")
+                self.logger.info(f"成功保存用户 {username} 的数据（新版本）")
                 return True
                 
         except Exception as e:
@@ -187,21 +189,27 @@ class DatabaseManager:
             return False
     
     def load_user_data(self, username):
-        """加载用户数据"""
-        self.logger.info(f"加载用户数据: {username}")
+        """加载用户数据 - 获取最新版本"""
+        self.logger.info(f"加载用户 {username} 的最新数据")
         
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 
+                # 获取该用户最新的数据记录
                 cursor.execute(
-                    "SELECT data_json FROM user_data WHERE username = ?",
+                    """
+                    SELECT data_json FROM user_data 
+                    WHERE username = ? 
+                    ORDER BY updated_at DESC LIMIT 1
+                    """,
                     (username,)
                 )
                 
                 result = cursor.fetchone()
                 
                 if result:
+                    self.logger.info(f"成功获取到用户 {username} 的最新数据")
                     return result['data_json']
                 else:
                     self.logger.warning(f"未找到用户 {username} 的数据")
