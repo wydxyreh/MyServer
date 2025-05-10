@@ -652,8 +652,15 @@ def main():
     
     try:
         # 连接服务器
-        if not network_manager.connect():
-            logger.warning("初始连接失败，请检查服务器是否启动")
+        connected = False
+        while not connected:
+            if network_manager.connect():
+                connected = True
+                logger.info("成功连接到服务器")
+            else:
+                logger.warning("连接服务器失败，3秒后重试...")
+                print("[系统] 连接服务器失败，正在尝试重连...")
+                time.sleep(2)  # 等待3秒后重试
         
         # 创建客户端实体
         client_entity = ClientEntity(network_manager)
