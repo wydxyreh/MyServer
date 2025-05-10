@@ -275,7 +275,7 @@ class ClientEntity:
         self.authenticated = False
         self.username = self.DEFAULT_USERNAME
         self.password = self.DEFAULT_PASSWORD
-        self.token = None
+        self.token = None  # 只在内存中临时存储token
         self.login_in_progress = False
         self.login_attempts = 0
         
@@ -308,7 +308,7 @@ class ClientEntity:
         
         # 重置认证状态
         self.authenticated = False
-        self.token = None
+        self.token = None  # 清除token，强制使用账密重新登录
         
     def disconnect(self, disable_reconnect=False):
         """主动断开与服务器的连接
@@ -372,6 +372,58 @@ class ClientEntity:
         # 清空消息队列
         self.pending_messages = []
     
+    def login(self):
+        """执行登录操作
+        
+        尝试使用以下优先级登录:
+        1. 如果有token1. 如果有token，先尝试使用token登录
+        2. 否则，使用用户名和密码登录
+        """
+        if not self.network_manager.connected:
+            self.logger.warning("尝试登录但未连接到服务器")
+            print("[登录] 错误: 未连接到服务器")
+            return False
+            
+        if self.login_in_progress:
+            self.logger.warning("登录操作已在进行中")
+            print("[登录] 请稍候，登录操作正在进行中...")
+            return False
+            
+        self.login_in_progress = True
+        
+        try:
+            # 先尝试使用token登录（如果有）
+            if self.token:
+                self.logger.info("使用token尝试登录")
+                self.caller.remote_call("client_login", None, None, self.token)
+            else:
+                # 使用账号密码登录
+                self.logger.info(f"使用账号密码尝试登录: {self.username}")
+                self.caller.remote_call("client_login", self.username, self.password)
+                
+            return True
+        except Exception as e:
+            self.logger.error(f"发送登录请求时出错: {str(e)}")
+            self.login_in_progress = False
+            print(f"[登录] 错误: {str(e)}")
+            return False
+    
+    def logout(self):
+        """执行登出操作"""
+        if not self.authenticated:
+            self.logger.warning("尝试登出但未登录")
+            print("[登出] 错误: 您尚未登录")
+            return False
+            
+        try:
+            self.logger.info("发送登出请求")
+            self.caller.remote_call("client_logout")
+            return True
+        except Exception as e:
+            self.logger.error(f"发送登出请求时出错: {str(e)}")
+            print(f"[登出] 错误: {str(e)}")
+            return False
+    
     @EXPOSED
     def login_success(self, token):
         """登录成功回调"""
@@ -397,12 +449,47 @@ class ClientEntity:
             self.logger.error(f"处理登录成功回调时出错: {str(e)}")
     
     @EXPOSED
-    def kicked(self, reason):
-        """被踢下线的回调"""
+    def token_invalid(self, reason):
+        """token无效的回调"""
+        self.logger.warning(f"Token无效: {reason}")
+        print(f"[登录] Token无效: {reason}")
+        self.token = None  # 清除无效token
+        
+        # 尝试使用账号密码重新登录
+        print("[登录] 正在使用账号密码重新登录...")
+        self.login_in_progress = False
+        self.login()
+    
+    @EXPOSED
+    def process_existing_session(self, message):
+        """处理已存在会话的回调"""
+        self.logger.info(f"服务器正在处理旧会话: {message}")
+        print(f"[登录] {message}")
+    
+    @EXPOSED
+    def logout_success(self):
+        """登出成功回调"""
         self.authenticated = False
         self.token = None
-        self.logger.warning(f"您的账号在其他设备登录，被迫下线: {reason}")
-        print(f"[系统] 您已被服务器踢下线: {reason}")
+        self.logger.info("登出成功")
+        print("[登出] 成功!")
+    
+    @EXPOSED
+    def forced_logout(self, reason):
+        """被强制登出的回调"""
+        self.authenticated = False
+        self.logger.warning(f"您被强制登出: {reason}")
+        print(f"[系统] 您被强制登出: {reason}")
+        
+        # 保存数据
+        print("[数据] 正在保存您的数据...")
+        if hasattr(self, 'user_data') and self.user_data:
+            try:
+                data_json = json.dumps(self.user_data)
+                self.caller.remote_call("userdata_save", data_json)
+            except Exception as e:
+                self.logger.error(f"在被强制登出时保存数据失败: {str(e)}")
+                print(f"[数据] 保存失败: {str(e)}")
     
     @EXPOSED
     def server_shutdown(self, message):
@@ -572,7 +659,7 @@ def main():
             client_entity.username = args.username
         if args.password:
             client_entity.password = args.password
-            
+        
         # 注册信号处理函数
         def setup_signal_handlers():
             try:

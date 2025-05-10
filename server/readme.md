@@ -119,4 +119,5 @@ C:\Users\wydx\Documents\Unreal Projects\Server\sample_server.py
 C:\Users\wydx\Documents\Unreal Projects\Server\sample_client.py
 修改客户端和服务端代码，要求：
 1.服务端和客户端都具备相应的、主动断开连接的函数；
-2.无论是客户端主动发起，还是服务端主动发起的，在连接断开的最后，都需要收到来自对方的ack；
+2.连接建立后，服务端会标记该客户端，如果客户端在一定时间内没有完成登录操作，则服务端会自动断开与客户端之间的连接；
+3.客户端在连接建立后，如果发送RPC请求在一定时间内没有收到来自服务端的回复，则客户端也会自动断开与服务端之间的连接；

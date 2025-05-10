@@ -47,6 +47,9 @@ class GameServerEntity:
         self.login_attempts = 0
         self.max_login_attempts = 5 # 最大登录尝试次数
         
+        # 登出相关
+        self.save_data_before_logout = False  # 标记是否需要在登出前保存数据
+        
         # IP地址信息
         self.ip_address = self._get_ip_address(netstream)
         
@@ -155,12 +158,35 @@ class GameServerEntity:
         return True
     
     @EXPOSED
-    def client_login(self, username, password):
-        """处理客户端登录请求"""
+    def client_login(self, username=None, password=None, token=None):
+        """处理客户端登录请求
+        
+        参数:
+            username: 用户名
+            password: 密码
+            token: 认证令牌，如果提供则优先使用
+        """
         try:
             self.update_activity_time()
             
-            # 安全检查 - 防止空值或非法值
+            # 先尝试使用token登录
+            if token:
+                self.logger.info(f"客户端 {self.id} 尝试使用token认证")
+                username = self.server.validate_token(token, self.id)
+                
+                if username:
+                    # token有效，直接登录成功
+                    self.logger.info(f"客户端 {self.id} 使用token认证成功: {username}")
+                    self.token = token
+                    self._handle_successful_login(username, token, is_token_login=True)
+                    return
+                else:
+                    # token无效，通知客户端
+                    self.logger.warning(f"客户端 {self.id} 提供的token无效")
+                    self._send_client_response("token_invalid", "令牌无效，请使用账号密码登录")
+                    return
+            
+            # 使用用户名密码登录 - 安全检查
             if not username or not isinstance(username, str) or not password or not isinstance(password, str):
                 self.logger.warning(f"客户端 {self.id} 提供无效凭据格式")
                 self._send_client_response("login_failed", "无效的用户名或密码格式")
@@ -173,7 +199,7 @@ class GameServerEntity:
                 return
                 
             # 记录登录尝试（不记录密码）
-            self.logger.info(f"客户端 {self.id} 尝试认证: {username}")
+            self.logger.info(f"客户端 {self.id} 尝试使用账密认证: {username}")
             
             # 检查登录次数限制（防止暴力破解）
             if self.login_attempts >= self.max_login_attempts:
@@ -195,7 +221,7 @@ class GameServerEntity:
                 token = self.server._generate_token(username, self.id)
                 if token:
                     # 处理认证成功
-                    self._handle_successful_login(username, token)
+                    self._handle_successful_login(username, token, is_token_login=False)
                 else:
                     self.logger.error(f"客户端 {self.id} 认证成功但token生成失败")
                     self._send_client_response("login_failed", "内部处理错误")
@@ -208,13 +234,32 @@ class GameServerEntity:
             self._log_error("处理登录请求时出错", e)
             self._send_client_response("login_failed", "登录过程中发生错误")
     
-    def _handle_successful_login(self, username, token):
-        """处理成功的登录请求"""
+    def _handle_successful_login(self, username, token, is_token_login=False):
+        """处理成功的登录请求
+        
+        参数:
+            username: 用户名
+            token: 认证令牌
+            is_token_login: 是否是使用token登录的
+        """
         try:
             # 检查该用户是否已经在其他客户端登录
             existing_client = self.server.find_client_by_username(username)
             if existing_client and existing_client != self:
-                self._handle_existing_login(existing_client)
+                # 如果是新客户端用账密登录，需要处理旧客户端
+                if not is_token_login:
+                    # 先通知新客户端正在处理旧连接
+                    self._send_client_response("process_existing_session", "正在处理旧连接，请稍候...")
+                    # 通知旧客户端被登出并保存数据
+                    self._handle_existing_login(existing_client)
+                    # 等待旧客户端处理完成
+                    # 实际情况下会有一定延迟，这里简化处理
+                else:
+                    # 如果是使用token登录，token应该已经与客户端ID绑定，不应该出现这种情况
+                    # 除非是服务端缓存不一致，这里按照token无效处理
+                    self.logger.error(f"使用token登录但发现用户 {username} 已在其他客户端登录，可能是缓存不一致")
+                    self._send_client_response("token_invalid", "会话不一致，请使用账号密码重新登录")
+                    return
             
             # 登录成功
             self.authenticated = True
@@ -237,12 +282,22 @@ class GameServerEntity:
 
     def _handle_existing_login(self, existing_client):
         """处理已存在的登录会话"""
-        self.logger.warning(f"用户 {existing_client.username} 已在其他客户端登录，强制断开旧连接")
-        # 告知旧客户端被踢出
+        self.logger.warning(f"用户 {existing_client.username} 已在其他客户端登录，强制登出旧连接")
+        # 告知旧客户端被登出
         try:
-            existing_client._send_client_response("kicked", "您的账号在其他设备登录")
-        except:
-            pass
+            # 通知旧客户端被踢出
+            existing_client._send_client_response("forced_logout", "您的账号在其他设备登录")
+            
+            # 要求旧客户端先保存数据
+            existing_client.save_data_before_logout = True
+            
+            # 等待旧客户端处理（实际应用中可能需要一个更复杂的机制来确保处理完成）
+            # 这里简单等待一段时间
+            import time
+            time.sleep(0.5)
+        except Exception as e:
+            self.logger.error(f"通知旧客户端时出错: {str(e)}")
+        
         # 强制断开旧连接
         existing_client._request_client_removal()
     
@@ -323,10 +378,55 @@ class GameServerEntity:
     def process_messages(self):
         """批量处理积累的消息"""
         if not self.pending_messages:
+            # 处理被登出逻辑
+            if self.save_data_before_logout and self.authenticated:
+                self.logger.info(f"用户 {self.username} 被强制登出，正在保存数据")
+                self.save_data_before_logout = False
+                # 执行数据保存操作
+                user_data = db_manager.load_user_data(self.username)
+                if user_data:
+                    # 这里简化处理，正常情况应该使用客户端当前的数据
+                    db_manager.save_user_data(self.username, user_data)
+                    self.logger.info(f"用户 {self.username} 的数据已保存")
+                    # 通知客户端数据已保存
+                    self._send_client_response("save_success")
+                
+                # 延迟断开连接，确保消息已发送
+                import threading
+                threading.Timer(0.5, self._request_client_removal).start()
             return
             
         self.pending_messages = []  # 清空消息队列
         
+    @EXPOSED
+    def client_logout(self):
+        """处理客户端登出请求"""
+        if not self._verify_auth("登出"):
+            return
+            
+        self.logger.info(f'客户端 {self.id} (用户: {self.username}) 请求登出')
+        
+        # 使token失效
+        if self.token:
+            self.server.invalidate_token(self.token)
+            self.token = None
+            
+        # 修改认证状态
+        self.authenticated = False
+        
+        # 从用户名索引中移除
+        if self.username in self.server.clients_by_username:
+            if self.server.clients_by_username[self.username] == self:
+                del self.server.clients_by_username[self.username]
+        
+        # 发送登出成功消息
+        self._send_client_response("logout_success")
+        
+        # 保持连接，但重置用户名
+        old_username = self.username
+        self.username = None
+        self.logger.info(f'用户 {old_username} 登出成功，但保持连接')
+    
     @EXPOSED
     def exit(self):
         """处理客户端的退出请求"""
@@ -704,35 +804,6 @@ class MyGameServer(SimpleServer):
         except Exception as e:
             self.logger.error(f"断开客户端 {client_id} 连接时出错: {str(e)}")
             return False
-    
-    def disconnect_user(self, username, reason="服务器主动断开连接"):
-        """通过用户名主动断开指定用户的连接
-        
-        Args:
-            username: 用户名
-            reason: 断开原因
-        
-        Returns:
-            bool: 断开成功返回True，否则返回False
-        """
-        if username not in self.clients_by_username:
-            self.logger.warning(f"尝试断开不存在的用户连接: {username}")
-            return False
-            
-        client = self.clients_by_username[username]
-        if client and hasattr(client, 'netstream') and client.netstream:
-            return self.disconnect_client(client.netstream.hid, reason)
-        return False
-    
-    def shutdown_all_clients(self, reason="服务器正在关闭"):
-        """优雅地关闭所有客户端连接"""
-        self.logger.info(f"通知所有客户端服务器关闭: {reason}")
-        for client_id, client in list(self.clients.items()):
-            try:
-                if client and client.caller:
-                    client._send_client_response("server_shutdown", reason)
-            except Exception as e:
-                self.logger.warning(f"通知客户端 {client_id} 服务器关闭时出错: {str(e)}")
 
 def signal_handler(signum, frame):
     """处理系统信号"""
