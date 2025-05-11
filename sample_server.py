@@ -551,7 +551,7 @@ class MyGameServer(SimpleServer):
         }
         
         # 未登录客户端超时时间（秒）
-        self.login_timeout = 3  # 30秒内必须完成登录
+        self.login_timeout = 30  # 30秒内必须完成登录
         
         # 注册网络事件处理
         self.host.onConnected = self.on_client_connected
