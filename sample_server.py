@@ -657,14 +657,76 @@ class MyGameServer(SimpleServer):
         try:
             client_entity = self.clients[client_id]
             
-            # 安全检查：未认证客户端限速和数据包大小限制
-            if not client_entity.authenticated and time.time() - client_entity.last_activity_time < 0.05:
-                self.logger.warning(f"客户端 {client_id} 数据请求频率过高，可能是攻击行为")
-                return
+            # 安全检查：请求频率和数据包大小限制
+            current_time = time.time()
             
-            # 数据包大小限制(1MB)
-            if len(data) > 1024 * 1024:
-                self.logger.warning(f"客户端 {client_id} 发送超大数据包，可能是攻击行为")
+            # 初始化客户端的请求计数器（如果不存在）
+            if not hasattr(client_entity, 'request_stats'):
+                client_entity.request_stats = {
+                    'last_check_time': current_time,
+                    'request_count': 0,
+                    'data_volume': 0,
+                    'warning_count': 0
+                }
+            
+            # 更新请求统计
+            stats = client_entity.request_stats
+            stats['request_count'] += 1
+            stats['data_volume'] += len(data)
+            
+            # 自适应请求频率限制 - 基于时间窗口的动态调整
+            time_window = 1.0  # 1秒时间窗口
+            elapsed = current_time - stats['last_check_time']
+            
+            if elapsed >= time_window:
+                # 计算请求速率（每秒请求数和数据量）
+                requests_per_sec = stats['request_count'] / elapsed
+                data_per_sec = stats['data_volume'] / elapsed
+                
+                # 动态阈值：基础值 + 认证状态调整 + 历史行为加权
+                # 已认证用户有更高的请求限制
+                auth_factor = 2.0 if client_entity.authenticated else 1.0
+                base_req_limit = 20 * auth_factor  # 基础请求数限制
+                
+                # 动态数据量限制 (单位：字节/秒)
+                base_data_limit = 100000 * auth_factor  # 约100KB/秒
+                
+                # 检查是否超过限制
+                if (requests_per_sec > base_req_limit or data_per_sec > base_data_limit):
+                    stats['warning_count'] += 1
+                    self.logger.warning(
+                        f"客户端 {client_id} 请求速率异常: "
+                        f"{requests_per_sec:.2f}请求/秒, {data_per_sec:.2f}字节/秒, "
+                        f"警告次数: {stats['warning_count']}"
+                    )
+                    
+                    # 针对连续多次超限的处理（3次警告后采取措施）
+                    if stats['warning_count'] >= 3:
+                        # 仅对未认证客户端采取严格限制
+                        if not client_entity.authenticated:
+                            self.logger.error(f"客户端 {client_id} 持续高频请求，可能是攻击行为，断开连接")
+                            self.mark_client_for_removal(client_id)
+                            return
+                        else:
+                            # 对认证客户端发出警告但不断开连接
+                            client_entity._send_client_response("rate_limit_warning", 
+                                                               "您的请求频率过高，请减缓请求速度")
+                            # 重置警告计数，给予宽限
+                            stats['warning_count'] = 1
+                else:
+                    # 正常请求速率，逐渐减少警告计数
+                    stats['warning_count'] = max(0, stats['warning_count'] - 1)
+                
+                # 重置统计
+                stats['last_check_time'] = current_time
+                stats['request_count'] = 0
+                stats['data_volume'] = 0
+                
+            # 单个数据包大小限制(1MB)
+            max_packet_size = 1048576  # 1MB
+            if len(data) > max_packet_size:
+                self.logger.warning(f"客户端 {client_id} 发送过大的数据包: {len(data)}字节")
+                client_entity._send_client_response("data_error", "数据包过大")
                 return
                 
             # 更新客户端活动时间并记录统计
