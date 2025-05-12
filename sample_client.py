@@ -469,8 +469,6 @@ class ClientEntity:
         self.token = None  # 清除token
         self.logger.warning(f"您被强制登出: {reason}")
         print(f"[系统] 您被强制登出: {reason}")
-        
-        # 服务端会在需要时通过 save_user_data 调用请求客户端保存数据
     
     @EXPOSED
     @log_function
