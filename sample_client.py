@@ -310,6 +310,11 @@ class ClientEntity:
         # RPC超时设置
         self.pending_rpc_calls = {}  # 存储待响应的RPC调用 {call_id: (timestamp, func_name)}
         self.rpc_timeout = 10.0  # RPC调用超时时间(秒)
+        
+        # 广播消息相关
+        self.achievement_broadcast_received = False  # 标志位：是否接收到成就广播
+        self.last_achievement_broadcast = None  # 最近接收到的成就广播内容
+        self.achievement_broadcasts_history = []  # 存储历史广播消息
     
     @log_function
     def disconnect(self):
@@ -783,6 +788,36 @@ class ClientEntity:
             self.logger.warning("服务器请求保存数据，但客户端没有可保存的数据")
             print("[数据] 没有可保存的数据")
     
+    @log_function
+    def get_recent_achievement_broadcast(self, clear_flag=False):
+        """获取最近的成就广播内容，可选择是否清除标志位
+        
+        Args:
+            clear_flag: 是否在获取后清除接收标志位，默认为False
+            
+        Returns:
+            dict/None: 最近的广播内容，如果没有则返回None
+        """
+        broadcast_content = None
+        
+        if self.achievement_broadcast_received and self.last_achievement_broadcast:
+            broadcast_content = self.last_achievement_broadcast
+            
+            # 如果需要清除标志位
+            if clear_flag:
+                self.achievement_broadcast_received = False
+                
+        return broadcast_content
+    
+    @log_function
+    def has_new_achievement_broadcast(self):
+        """检查是否有新的成就广播
+        
+        Returns:
+            bool: 是否有新的未处理的成就广播
+        """
+        return self.achievement_broadcast_received
+    
     @EXPOSED
     @log_function
     def connection_closed(self, reason):
@@ -813,6 +848,50 @@ class ClientEntity:
         """服务器ping测试响应"""
         self.logger.info(f"收到服务器ping响应: {message}")
         print(f"[连接测试] {message}")
+        
+    @EXPOSED
+    @log_function
+    def achievement_broadcast(self, username, threshold_title, threshold_value):
+        """接收服务器广播的成就通知
+        
+        Args:
+            username: 达到阈值的用户名
+            threshold_title: 阈值的名称/标题
+            threshold_value: 达到的具体阈值值
+        """
+        # 记录成就广播
+        self.logger.info(f"收到成就广播: 用户 {username} 达到 {threshold_title} ({threshold_value})")
+        
+        # 判断是否是自己的成就
+        is_own_achievement = self.username == username
+        
+        # 构建广播内容
+        broadcast_content = {
+            "username": username,
+            "threshold_title": threshold_title,
+            "threshold_value": threshold_value,
+            "timestamp": time.time(),
+            "is_own_achievement": is_own_achievement
+        }
+        
+        # 更新广播接收标志位和内容
+        self.achievement_broadcast_received = True
+        self.last_achievement_broadcast = broadcast_content
+        
+        # 添加到历史广播记录
+        self.achievement_broadcasts_history.append(broadcast_content)
+        # 保持历史记录在合理范围内（最多保存10条）
+        if len(self.achievement_broadcasts_history) > 10:
+            self.achievement_broadcasts_history.pop(0)
+        
+        # 构建显示信息
+        if is_own_achievement:
+            message = f"[成就] 恭喜! 您已达到 '{threshold_title}' 成就! 击杀数: {threshold_value}"
+        else:
+            message = f"[系统公告] 玩家 {username} 已达到 '{threshold_title}' 成就! 击杀数: {threshold_value}"
+        
+        # 显示成就通知，可以在此处添加UI通知逻辑
+        print(message)
 
 @log_function
 def setup_timers(client_entity, network_manager):

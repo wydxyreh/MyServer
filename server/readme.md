@@ -157,3 +157,8 @@ PS C:\Users\wydx\Documents\Unreal Projects\Server> & C:/Users/wydx/AppData/Local
 在服务端因为登录超时而断开连接之后，客户端并没出现任何的通知提示；
 理论上来讲，服务端会调用客户端的connection_closed函数，而客户端的connection_closed函数会有日志输出，而客户端日志中却又没有对应日志显示，分析并解决这个问题；
 
+C:\Users\wydx\Documents\Unreal Projects\Server\sample_server.py
+C:\Users\wydx\Documents\Unreal Projects\Server\sample_client.py
+在客户端主动进行save操作的时候，服务端会检测来自客户端的json数据中是否有KiiledEnemies字段，如果有，则进一步检查其是否到达某几个阈值，这些阈值作为宏变量定义在服务端结构体当中，如果达到了某些阈值，则直接触发一次广播：服务端会对所有连接到且登录了的客户端进行一次广播，给所有的客户端发送一条消息，消息内容包括了KiiledEnemies字段到达阈值的客户端对象的username，以及其KiiledEnemies所达到的具体阈值。客户端也需要额外增加RPC函数来和服务端的对应功能进行匹配；每个阈值对于每个客户端所连接到的账号只处理一次，并且是否处理有一些字段或标志位记录保存在服务端（定义一个特殊的结构体来存储对应字段），在数据save和load的时候，这些对应v字段会和json一起在数据库中进行存储或者读取，以便于服务端在数据保存和加载的时候，可以直接读取这些字段的值。
+
+内容的修改均放在两个文件中完成。

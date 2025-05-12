@@ -74,6 +74,41 @@ def log_function(func):
         return result
     return wrapper
 
+# 定义KilledEnemies阈值
+class KilledEnemiesThresholds:
+    """用于标记用户击杀敌人数量达到的阈值级别"""
+    THRESHOLD_ROOKIE = 1        # 新手
+    THRESHOLD_FIGHTER = 2       # 战士
+    THRESHOLD_VETERAN = 3      # 老兵
+    THRESHOLD_MASTER = 10       # 大师
+    THRESHOLD_LEGEND = 50       # 传奇
+
+# 用于存储用户阈值达成状态的结构体
+class AchievementStatus:
+    """用于存储用户已达成的阈值成就状态"""
+    def __init__(self):
+        self.reached_thresholds = {}  # {阈值名称: 是否已处理}
+    
+    def has_reached_threshold(self, threshold_name):
+        """检查是否已达到并处理过指定阈值"""
+        return self.reached_thresholds.get(threshold_name, False)
+    
+    def mark_threshold_reached(self, threshold_name):
+        """标记某阈值已处理"""
+        self.reached_thresholds[threshold_name] = True
+        
+    def to_json(self):
+        """转换为可序列化的字典"""
+        return self.reached_thresholds
+    
+    @staticmethod
+    def from_json(json_data):
+        """从JSON数据创建实例"""
+        status = AchievementStatus()
+        if isinstance(json_data, dict):
+            status.reached_thresholds = json_data
+        return status
+
 class GameServerEntity:
     """游戏服务器实体类，处理单个客户端连接和逻辑"""
     
@@ -99,6 +134,9 @@ class GameServerEntity:
         
         # 登出相关
         self.save_data_before_logout = False  # 标记是否需要在登出前保存数据
+        
+        # 成就相关
+        self.achievement_status = AchievementStatus()
         
         # IP地址信息
         self.ip_address = self._get_ip_address(netstream)
@@ -407,6 +445,37 @@ class GameServerEntity:
             if not self._validate_json_data(data_json):
                 return
             
+            # 从JSON数据中检查KilledEnemies字段
+            try:
+                data = json.loads(data_json)
+                
+                # 尝试加载用户的成就状态
+                old_data = db_manager.load_user_data(self.username)
+                if old_data:
+                    try:
+                        old_data_obj = json.loads(old_data)
+                        if "AchievementStatus" in old_data_obj:
+                            self.achievement_status = AchievementStatus.from_json(old_data_obj["AchievementStatus"])
+                    except:
+                        # 如果加载失败，继续使用默认空状态
+                        pass
+                
+                # 检查KilledEnemies字段是否存在
+                if "KilledEnemies" in data:
+                    killed_enemies = data["KilledEnemies"]
+                    if isinstance(killed_enemies, (int, float)):
+                        # 检查各个阈值
+                        self._check_killed_enemies_thresholds(killed_enemies)
+                
+                # 将成就状态保存回数据对象
+                data["AchievementStatus"] = self.achievement_status.to_json()
+                # 更新JSON数据
+                data_json = json.dumps(data)
+            except json.JSONDecodeError:
+                self.logger.warning(f"检查KilledEnemies字段时JSON解析失败")
+            except Exception as e:
+                self.logger.warning(f"处理KilledEnemies阈值时出错: {str(e)}")
+            
             # 使用用户名作为唯一索引键存储数据    
             success = db_manager.save_user_data(self.username, data_json)
             
@@ -420,6 +489,29 @@ class GameServerEntity:
         except Exception as e:
             self._log_error("保存数据时出错", e)
             self._send_client_response("data_error", f"保存数据时出错: {str(e)}")
+    
+    @log_function
+    def _check_killed_enemies_thresholds(self, killed_enemies):
+        """检查击杀敌人数量是否达到阈值并处理相应逻辑"""
+        # 定义阈值和对应的通知消息
+        thresholds = [
+            (KilledEnemiesThresholds.THRESHOLD_ROOKIE, "THRESHOLD_ROOKIE", "新手猎手"),
+            (KilledEnemiesThresholds.THRESHOLD_FIGHTER, "THRESHOLD_FIGHTER", "战斗精英"),
+            (KilledEnemiesThresholds.THRESHOLD_VETERAN, "THRESHOLD_VETERAN", "老练猎人"),
+            (KilledEnemiesThresholds.THRESHOLD_MASTER, "THRESHOLD_MASTER", "猎杀大师"),
+            (KilledEnemiesThresholds.THRESHOLD_LEGEND, "THRESHOLD_LEGEND", "传奇杀手")
+        ]
+        
+        for threshold_value, threshold_name, threshold_title in thresholds:
+            # 检查是否达到阈值且之前未处理过
+            if killed_enemies >= threshold_value and not self.achievement_status.has_reached_threshold(threshold_name):
+                self.logger.info(f"用户 {self.username} 达到 KilledEnemies 阈值 {threshold_name}: {threshold_value}")
+                
+                # 标记为已处理
+                self.achievement_status.mark_threshold_reached(threshold_name)
+                
+                # 广播成就到所有已登录的客户端
+                self.server.broadcast_achievement(self.username, threshold_title, threshold_value)
     
     @log_function
     def _validate_json_data(self, data):
@@ -589,6 +681,28 @@ class MyGameServer(SimpleServer):
         """注册已认证的客户端到用户名索引"""
         if username and client:
             self.clients_by_username[username] = client
+            
+    @log_function
+    def broadcast_achievement(self, username, threshold_title, threshold_value):
+        """向所有已连接且登录的客户端广播用户的成就
+        
+        Args:
+            username: 达到阈值的用户名
+            threshold_title: 阈值的标题/名称
+            threshold_value: 达到的具体阈值值
+        """
+        self.logger.info(f"广播用户 {username} 的成就: {threshold_title} ({threshold_value})")
+        
+        # 构建广播消息
+        message = f"{username} 已达到 '{threshold_title}' 成就! 击杀数: {threshold_value}"
+        
+        # 遍历所有认证客户端并发送消息
+        for client in self.clients_by_username.values():
+            if client and client.authenticated:
+                try:
+                    client._send_client_response("achievement_broadcast", username, threshold_title, threshold_value)
+                except Exception as e:
+                    self.logger.warning(f"向客户端 {client.id} 广播成就时出错: {str(e)}")
             
     @log_function
     def mark_client_for_removal(self, client_id):
