@@ -609,11 +609,11 @@ class ClientEntity:
     
     @EXPOSED
     @log_function
-    def save_user_data(self):
+    def on_save_data_request(self):
         """响应服务器的数据保存请求"""
         self.logger.info("服务器请求保存用户数据")
         print("[数据] 服务器请求保存您的数据...")
-        
+    
         if hasattr(self, 'user_data') and self.user_data:
             try:
                 data_json = json.dumps(self.user_data)

@@ -453,7 +453,7 @@ class GameServerEntity:
                 self.save_data_before_logout = False
                 
                 # 通知客户端保存数据
-                self._send_client_response("save_user_data")
+                self._send_client_response("on_save_data_request")
                 self.logger.info(f"已发送保存数据请求给用户 {self.username} 的客户端")
                 
                 # 延迟断开连接，确保客户端有足够时间保存并上传数据
@@ -504,7 +504,7 @@ class GameServerEntity:
         if self.authenticated:
             self.logger.info(f"客户端ID: {self.id}, 用户: {self.username} 退出前请求保存数据")
             # 通知客户端保存数据
-            self._send_client_response("save_user_data")
+            self._send_client_response("on_save_data_request")
             
             # 使token失效
             if self.token:
