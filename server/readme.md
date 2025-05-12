@@ -156,3 +156,4 @@ PS C:\Users\wydx\Documents\Unreal Projects\Server> & C:/Users/wydx/AppData/Local
 
 在服务端因为登录超时而断开连接之后，客户端并没出现任何的通知提示；
 理论上来讲，服务端会调用客户端的connection_closed函数，而客户端的connection_closed函数会有日志输出，而客户端日志中却又没有对应日志显示，分析并解决这个问题；
+

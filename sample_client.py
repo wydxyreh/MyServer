@@ -278,10 +278,34 @@ class ClientEntity:
         self.token = None  # 只在内存中临时存储token
         self.login_in_progress = False
         self.login_attempts = 0
+        self.auth_status = {
+            "is_logged_in": False,
+            "login_time": None,
+            "last_token_refresh": None,
+            "login_error": None
+        }
         
         # 用户数据
         self.user_data = {}
         self.user_data_exists = False  # 标记用户数据是否存在
+        
+        # 数据操作状态记录
+        self.data_operations = {
+            "save": {
+                "last_attempt_time": None,
+                "last_success_time": None,
+                "success": False,
+                "error_message": None,
+                "pending": False
+            },
+            "load": {
+                "last_attempt_time": None,
+                "last_success_time": None,
+                "success": False,
+                "error_message": None,
+                "pending": False
+            }
+        }
         
         # RPC超时设置
         self.pending_rpc_calls = {}  # 存储待响应的RPC调用 {call_id: (timestamp, func_name)}
@@ -415,6 +439,15 @@ class ClientEntity:
             if not token:
                 self.logger.warning("认证成功但收到空token！这是服务端错误！")
                 self.authenticated = False
+                
+                # 更新认证状态
+                self.auth_status = {
+                    "is_logged_in": False,
+                    "login_time": None,
+                    "last_token_refresh": None,
+                    "login_error": "服务器返回无效token"
+                }
+                
                 print(f"[登录] 异常: 服务器返回无效token")
                 return
                 
@@ -422,6 +455,15 @@ class ClientEntity:
             self.token = token
             self.login_in_progress = False
             self.login_attempts = 0  # 重置登录尝试次数
+            
+            # 更新认证状态
+            current_time = time.time()
+            self.auth_status = {
+                "is_logged_in": True,
+                "login_time": current_time,
+                "last_token_refresh": current_time,
+                "login_error": None
+            }
             
             # 不在日志中显示完整的token，只显示部分
             masked_token = token[:5] + "..." + token[-5:] if len(token) > 10 else "***"
@@ -431,6 +473,8 @@ class ClientEntity:
                 
         except Exception as e:
             self.logger.error(f"处理登录成功回调时出错: {str(e)}")
+            # 更新认证失败状态
+            self.auth_status["login_error"] = str(e)
     
     @EXPOSED
     @log_function
@@ -495,6 +539,15 @@ class ClientEntity:
         self.authenticated = False
         self.token = None
         self.login_in_progress = False
+        
+        # 更新认证状态
+        self.auth_status = {
+            "is_logged_in": False,
+            "login_time": None,
+            "last_token_refresh": None,
+            "login_error": reason
+        }
+        
         self.logger.warning(f"登录失败: {reason}")
         print(f"[登录] 失败: {reason}")
     
@@ -502,9 +555,21 @@ class ClientEntity:
     @log_function
     def userdata_update(self, data_json):
         """接收用户数据更新"""
+        current_time = time.time()
+        
         try:
             self.user_data = json.loads(data_json)
             self.user_data_exists = True  # 标记数据已存在
+            
+            # 更新加载成功状态
+            self.data_operations["load"] = {
+                "last_attempt_time": self.data_operations["load"]["last_attempt_time"],
+                "last_success_time": current_time,
+                "success": True,
+                "error_message": None,
+                "pending": False
+            }
+            
             self.logger.info("接收用户数据")
             # 截断显示数据，避免过长输出
             data_preview = data_json[:50] + ("..." if len(data_json) > 50 else "")
@@ -512,11 +577,27 @@ class ClientEntity:
         except Exception as e:
             self.logger.error(f"解析数据失败: {str(e)}")
             print(f"[数据] 加载失败: {str(e)}")
+            
+            # 更新加载失败状态
+            self.data_operations["load"]["error_message"] = f"解析数据失败: {str(e)}"
+            self.data_operations["load"]["success"] = False
+            self.data_operations["load"]["pending"] = False
     
     @EXPOSED
     @log_function
     def save_success(self):
         """保存数据成功回调"""
+        current_time = time.time()
+        
+        # 更新保存操作状态
+        self.data_operations["save"] = {
+            "last_attempt_time": self.data_operations["save"]["last_attempt_time"],
+            "last_success_time": current_time,
+            "success": True,
+            "error_message": None,
+            "pending": False
+        }
+        
         self.logger.info("数据保存成功")
         print("[数据] 保存成功")
         
@@ -533,9 +614,26 @@ class ClientEntity:
         Args:
             data_json: JSON格式的数据，可以是字符串或JavaScript对象
         """
+        current_time = time.time()
+        
+        # 更新保存尝试状态
+        self.data_operations["save"] = {
+            "last_attempt_time": current_time,
+            "last_success_time": self.data_operations["save"]["last_success_time"],
+            "success": self.data_operations["save"]["success"],
+            "error_message": None,
+            "pending": True
+        }
+        
         if not self.authenticated:
             self.logger.warning("尝试保存数据但未认证")
             print("[数据] 错误: 请先登录")
+            
+            # 更新保存失败状态
+            self.data_operations["save"]["error_message"] = "未认证，请先登录"
+            self.data_operations["save"]["pending"] = False
+            self.data_operations["save"]["success"] = False
+            
             return False
             
         try:
@@ -546,14 +644,37 @@ class ClientEntity:
         except Exception as e:
             self.logger.error(f"保存数据时出错: {str(e)}")
             print(f"[数据] 保存错误: {str(e)}")
+            
+            # 更新保存失败状态
+            self.data_operations["save"]["error_message"] = str(e)
+            self.data_operations["save"]["pending"] = False
+            self.data_operations["save"]["success"] = False
+            
             return False
             
     @log_function
     def load_user_data(self):
         """从服务器加载最新的用户数据，结果通过userdata_update回调获取"""
+        current_time = time.time()
+        
+        # 更新加载尝试状态
+        self.data_operations["load"] = {
+            "last_attempt_time": current_time,
+            "last_success_time": self.data_operations["load"]["last_success_time"],
+            "success": self.data_operations["load"]["success"],
+            "error_message": None,
+            "pending": True
+        }
+        
         if not self.authenticated:
             self.logger.warning("尝试加载数据但未认证")
             print("[数据] 错误: 请先登录")
+            
+            # 更新加载失败状态
+            self.data_operations["load"]["error_message"] = "未认证，请先登录"
+            self.data_operations["load"]["pending"] = False
+            self.data_operations["load"]["success"] = False
+            
             return False
             
         try:
@@ -563,6 +684,12 @@ class ClientEntity:
         except Exception as e:
             self.logger.error(f"请求加载数据时出错: {str(e)}")
             print(f"[数据] 加载错误: {str(e)}")
+            
+            # 更新加载失败状态
+            self.data_operations["load"]["error_message"] = str(e)
+            self.data_operations["load"]["pending"] = False
+            self.data_operations["load"]["success"] = False
+            
             return False
     
     @EXPOSED
@@ -571,6 +698,25 @@ class ClientEntity:
         """数据操作错误回调"""
         self.logger.warning(f"数据操作错误: {message}")
         print(f"[数据] 错误: {message}")
+        
+        # 检查哪个操作正在等待结果
+        if self.data_operations["save"]["pending"]:
+            self.data_operations["save"] = {
+                "last_attempt_time": self.data_operations["save"]["last_attempt_time"],
+                "last_success_time": self.data_operations["save"]["last_success_time"],
+                "success": False,
+                "error_message": message,
+                "pending": False
+            }
+            
+        if self.data_operations["load"]["pending"]:
+            self.data_operations["load"] = {
+                "last_attempt_time": self.data_operations["load"]["last_attempt_time"],
+                "last_success_time": self.data_operations["load"]["last_success_time"],
+                "success": False,
+                "error_message": message,
+                "pending": False
+            }
         
     @EXPOSED
     @log_function
@@ -581,6 +727,18 @@ class ClientEntity:
         # 可以在这里设置一个标志，让用户知道需要创建新数据
         self.user_data_exists = False
         print("[数据] 您需要创建新的用户数据")
+        
+        # 更新加载结果状态
+        if self.data_operations["load"]["pending"]:
+            current_time = time.time()
+            self.data_operations["load"] = {
+                "last_attempt_time": self.data_operations["load"]["last_attempt_time"],
+                "last_success_time": current_time,  # 虽然没找到数据，但操作本身成功了
+                "success": True,
+                "error_message": "数据不存在，需要创建新数据",
+                "pending": False,
+                "data_exists": False
+            }
     
     @EXPOSED
     @log_function
