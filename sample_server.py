@@ -459,7 +459,14 @@ class GameServerEntity:
                     except:
                         # 如果加载失败，继续使用默认空状态
                         pass
-                
+                    
+                # 检查KilledEnemiesReset布尔值 - 如果为true则重置所有阈值标记
+                if "KilledEnemiesReset" in data and data["KilledEnemiesReset"] == True:
+                    self.logger.info(f"用户 {self.username} 请求重置KilledEnemies阈值标记")
+                    # 重置所有阈值记录
+                    self.achievement_status = AchievementStatus()
+                    self.logger.info(f"已重置用户 {self.username} 的所有KilledEnemies阈值标记")
+                    
                 # 检查KilledEnemies字段是否存在
                 if "KilledEnemies" in data:
                     killed_enemies = data["KilledEnemies"]
