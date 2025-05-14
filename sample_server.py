@@ -137,6 +137,7 @@ class GameServerEntity:
         
         # 成就相关
         self.achievement_status = AchievementStatus()
+        self.accomplishmentreset = False  # 添加成就重置标志
         
         # IP地址信息
         self.ip_address = self._get_ip_address(netstream)
@@ -256,20 +257,24 @@ class GameServerEntity:
     
     @EXPOSED
     @log_function
-    def client_login(self, username=None, password=None, token=None):
+    def client_login(self, username=None, password=None, token=None, accomplishmentreset=False):
         """处理客户端登录请求
         
         参数:
             username: 用户名
             password: 密码
             token: 认证令牌，如果提供则优先使用
+            accomplishmentreset: 是否重置所有阈值标记
         """
         try:
             self.update_activity_time()
             
+            # 记录是否需要重置成就状态
+            self.accomplishmentreset = accomplishmentreset
+            
             # 先尝试使用token登录
             if token:
-                self.logger.info(f"客户端 {self.id} 尝试使用token认证")
+                self.logger.info(f"客户端 {self.id} 尝试使用token认证 (重置成就: {accomplishmentreset})")
                 username = self.server.validate_token(token, self.id)
                 
                 if username:
@@ -297,7 +302,7 @@ class GameServerEntity:
                 return
                 
             # 记录登录尝试（不记录密码）
-            self.logger.info(f"客户端 {self.id} 尝试使用账密认证: {username}")
+            self.logger.info(f"客户端 {self.id} 尝试使用账密认证: {username} (重置成就: {accomplishmentreset})")
             
             # 检查登录次数限制（防止暴力破解）
             if self.login_attempts >= self.max_login_attempts:
@@ -370,6 +375,12 @@ class GameServerEntity:
             self.username = username
             self.token = token
             self.logger.info(f"客户端 {self.id} (IP: {self.ip_address}) 登录成功: {username}")
+            
+            # 检查是否需要重置成就状态
+            if self.accomplishmentreset:
+                self.logger.info(f"用户 {username} 请求重置阈值标记")
+                self.achievement_status = AchievementStatus()  # 创建新的空成就状态
+                self.logger.info(f"已重置用户 {username} 的所有阈值标记")
             
             # 发送登录成功消息
             self._send_client_response("login_success", token)
@@ -459,13 +470,6 @@ class GameServerEntity:
                     except:
                         # 如果加载失败，继续使用默认空状态
                         pass
-                    
-                # 检查KilledEnemiesReset布尔值 - 如果为true则重置所有阈值标记
-                if "KilledEnemiesReset" in data and data["KilledEnemiesReset"] == True:
-                    self.logger.info(f"用户 {self.username} 请求重置KilledEnemies阈值标记")
-                    # 重置所有阈值记录
-                    self.achievement_status = AchievementStatus()
-                    self.logger.info(f"已重置用户 {self.username} 的所有KilledEnemies阈值标记")
                     
                 # 检查KilledEnemies字段是否存在
                 if "KilledEnemies" in data:
@@ -955,6 +959,12 @@ class MyGameServer(SimpleServer):
                 client.username = username
                 client.token = token
                 self.logger.info(f"客户端 {client.id} (IP: {client.ip_address}) 登录成功: {username}")
+                
+                # 检查是否需要重置成就状态
+                if hasattr(client, 'accomplishmentreset') and client.accomplishmentreset:
+                    self.logger.info(f"用户 {username} 请求重置阈值标记")
+                    client.achievement_status = AchievementStatus()  # 创建新的空成就状态
+                    self.logger.info(f"已重置用户 {username} 的所有阈值标记")
                 
                 # 发送登录成功消息
                 client._send_client_response("login_success", token)

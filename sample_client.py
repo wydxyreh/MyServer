@@ -275,6 +275,7 @@ class ClientEntity:
         self.authenticated = False
         self.username = ""
         self.password = ""
+        self.accomplishmentreset = False  # 添加成就重置标志
         self.token = None  # 只在内存中临时存储token
         self.login_in_progress = False
         self.login_attempts = 0
@@ -389,6 +390,8 @@ class ClientEntity:
         尝试使用以下优先级登录:
         1. 如果有token，先尝试使用token登录
         2. 否则，使用用户名和密码登录
+        
+        如果设置了accomplishmentreset为True，则会请求服务器重置阈值标记
         """
         if not self.network_manager.connected:
             self.logger.warning("尝试登录但未连接到服务器")
@@ -405,12 +408,12 @@ class ClientEntity:
         try:
             # 先尝试使用token登录（如果有）
             if self.token:
-                self.logger.info("使用token尝试登录")
-                self.caller.remote_call("client_login", None, None, self.token)
+                self.logger.info(f"使用token尝试登录 (重置成就: {self.accomplishmentreset})")
+                self.caller.remote_call("client_login", None, None, self.token, self.accomplishmentreset)
             else:
                 # 使用账号密码登录
-                self.logger.info(f"使用账号密码尝试登录: {self.username}")
-                self.caller.remote_call("client_login", self.username, self.password)
+                self.logger.info(f"使用账号密码尝试登录: {self.username} (重置成就: {self.accomplishmentreset})")
+                self.caller.remote_call("client_login", self.username, self.password, None, self.accomplishmentreset)
                 
             return True
         except Exception as e:
