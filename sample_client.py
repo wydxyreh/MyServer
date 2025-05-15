@@ -791,7 +791,6 @@ class ClientEntity:
             self.logger.warning("服务器请求保存数据，但客户端没有可保存的数据")
             print("[数据] 没有可保存的数据")
     
-    @log_function
     def get_recent_achievement_broadcast(self, clear_flag=False):
         """获取最近的成就广播内容，可选择是否清除标志位
         
@@ -812,7 +811,6 @@ class ClientEntity:
                 
         return broadcast_content
     
-    @log_function
     def has_new_achievement_broadcast(self):
         """检查是否有新的成就广播
         
