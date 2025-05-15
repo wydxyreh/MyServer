@@ -460,6 +460,9 @@ class GameServerEntity:
             try:
                 data = json.loads(data_json)
                 
+                # 记录所有收到的json数据到日志
+                self.logger.info(f"用户 {self.username} 保存数据: 完整JSON数据: {data_json}")
+                
                 # 尝试加载用户的成就状态
                 old_data = db_manager.load_user_data(self.username)
                 if old_data:
@@ -480,6 +483,10 @@ class GameServerEntity:
                 
                 # 将成就状态保存回数据对象
                 data["AchievementStatus"] = self.achievement_status.to_json()
+                
+                # 记录achievement_status到日志
+                self.logger.info(f"用户 {self.username} 的成就状态: {json.dumps(self.achievement_status.to_json())}")
+                
                 # 更新JSON数据
                 data_json = json.dumps(data)
             except json.JSONDecodeError:
