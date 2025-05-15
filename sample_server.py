@@ -272,6 +272,7 @@ class GameServerEntity:
             # 记录是否需要重置成就状态
             self.accomplishmentreset = accomplishmentreset
             
+            
             # 先尝试使用token登录
             if token:
                 self.logger.info(f"客户端 {self.id} 尝试使用token认证 (重置成就: {accomplishmentreset})")
@@ -381,6 +382,20 @@ class GameServerEntity:
                 self.logger.info(f"用户 {username} 请求重置阈值标记")
                 self.achievement_status = AchievementStatus()  # 创建新的空成就状态
                 self.logger.info(f"已重置用户 {username} 的所有阈值标记")
+                
+                # 读取并更新用户最新数据, 将重置的成就状态保存到数据库
+                current_data = db_manager.load_user_data(username)
+                if current_data:
+                    try:
+                        data_obj = json.loads(current_data)
+                        data_obj["AchievementStatus"] = self.achievement_status.to_json()
+                        # 立即保存重置后的数据
+                        db_manager.save_user_data(username, json.dumps(data_obj))
+                        self.logger.info(f"已将用户 {username} 重置后的成就状态保存到数据库")
+                    except json.JSONDecodeError:
+                        self.logger.error(f"重置成就状态时解析用户数据失败")
+                    except Exception as e:
+                        self.logger.error(f"保存重置的成就状态时出错: {str(e)}")
             
             # 发送登录成功消息
             self._send_client_response("login_success", token)
